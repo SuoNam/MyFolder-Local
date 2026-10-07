@@ -1,0 +1,20 @@
+{
+  "name": "myfolder-lan-web",
+  "version": "1.5.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "typecheck": "vue-tsc --noEmit",
+    "build": "vue-tsc --noEmit && vite build"
+  },
+  "dependencies": {
+    "vue": "3.5.43"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "5.2.3",
+    "typescript": "~5.8.0",
+    "vite": "6.4.4",
+    "vue-tsc": "^2.2.8"
+  }
+}

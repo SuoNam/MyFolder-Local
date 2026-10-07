@@ -1,0 +1,121 @@
+name: Build Debian packages
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci && npm run build
+        working-directory: web
+      - run: python3 packaging/build_deb.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-source
+          path: dist/*_all.deb
+          if-no-files-found: error
+
+  ubuntu:
+    needs: web
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {suite: ubuntu22.04, runner: ubuntu-22.04, arch: amd64}
+          - {suite: ubuntu22.04, runner: ubuntu-22.04-arm, arch: arm64}
+          - {suite: ubuntu24.04, runner: ubuntu-24.04, arch: amd64}
+          - {suite: ubuntu24.04, runner: ubuntu-24.04-arm, arch: arm64}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            cmake g++ libjsoncpp-dev uuid-dev zlib1g-dev libssl-dev \
+            libsqlite3-dev libc-ares-dev python3 dpkg-dev curl ca-certificates
+      - name: Build and test
+        run: bash packaging/build_native.sh '${{ matrix.suite }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.suite }}-${{ matrix.arch }}
+          path: dist/*_${{ matrix.suite }}_${{ matrix.arch }}.deb
+          if-no-files-found: error
+
+  debian:
+    needs: web
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {suite: debian12, image: 'debian:bookworm', runner: ubuntu-24.04, arch: amd64}
+          - {suite: debian12, image: 'debian:bookworm', runner: ubuntu-24.04-arm, arch: arm64}
+          - {suite: debian13, image: 'debian:trixie', runner: ubuntu-24.04, arch: amd64}
+          - {suite: debian13, image: 'debian:trixie', runner: ubuntu-24.04-arm, arch: arm64}
+    runs-on: ${{ matrix.runner }}
+    container: ${{ matrix.image }}
+    timeout-minutes: 90
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            git cmake g++ libjsoncpp-dev uuid-dev zlib1g-dev libssl-dev \
+            libsqlite3-dev libc-ares-dev python3 dpkg-dev curl ca-certificates
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+      - name: Build and test
+        run: bash packaging/build_native.sh '${{ matrix.suite }}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deb-${{ matrix.suite }}-${{ matrix.arch }}
+          path: dist/*_${{ matrix.suite }}_${{ matrix.arch }}.deb
+          if-no-files-found: error
+
+  release:
+    needs: [web, ubuntu, debian]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: deb-*
+          path: dist
+          merge-multiple: true
+      - name: Publish all packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/*.deb --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/*.deb --verify-tag \
+              --title "MyFolder Local $GITHUB_REF_NAME" --notes-file RELEASE_NOTES.md
+          fi
