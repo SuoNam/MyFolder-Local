@@ -31,7 +31,7 @@ async function show() {
 function choose(option: Option) {
   emit('update:modelValue', option.value)
   close()
-  nextTick(() => trigger.value?.focus())
+  nextTick(() => { if (!trigger.value?.closest('[inert]')) trigger.value?.focus() })
 }
 function onKeydown(event: KeyboardEvent) {
   if (event.key === 'Escape' && open.value) {
