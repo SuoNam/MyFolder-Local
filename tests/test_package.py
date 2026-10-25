@@ -40,6 +40,7 @@ class PackageTest(unittest.TestCase):
                 self.assertTrue(archive.getmember("./opt/myfolder-lan/cpp/").isdir())
                 self.assertTrue(archive.getmember("./opt/myfolder-lan/web/dist/").isdir())
                 self.assertIn("./opt/myfolder-lan/cpp/src/main.cpp", names)
+                self.assertIn("./opt/myfolder-lan/cpp/src/auth.h", names)
                 self.assertIn("./opt/myfolder-lan/cpp/CMakeLists.txt", names)
                 self.assertIn("./opt/myfolder-lan/cpp/third_party/httplib.h", names)
                 self.assertIn("./opt/myfolder-lan/cpp/third_party/json.hpp", names)
@@ -49,6 +50,11 @@ class PackageTest(unittest.TestCase):
                 self.assertIn("./lib/systemd/system/myfolder-lan.service", names)
                 service = archive.extractfile("./lib/systemd/system/myfolder-lan.service").read()
                 self.assertIn(b"ExecStart=/opt/myfolder-lan/bin/myfolder-lan", service)
+                defaults = archive.extractfile("./etc/default/myfolder-lan").read().decode()
+                self.assertIn('MYFOLDER_PORT=8080', defaults)
+                self.assertIn('# MYFOLDER_REQUIRE_HTTPS_DEVICE_LOGIN=1', defaults)
+                self.assertNotIn('\nMYFOLDER_REQUIRE_HTTPS_DEVICE_LOGIN=1', defaults)
+                self.assertNotIn('MYFOLDER_ALLOW_INSECURE_DEVICE_LOGIN', defaults)
 
     def test_native_archive_creates_binary_directory(self):
         with tempfile.TemporaryDirectory() as directory:

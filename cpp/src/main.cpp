@@ -240,6 +240,7 @@ struct Config {
     size_t max_uploads;
     size_t max_request_bytes;
 };
+static void initialize_auth(Db& db);
 static Config config() {
     fs::path data = fs::absolute(path_from_utf8(env("MYFOLDER_DATA", "data")));
     fs::path web = fs::absolute(path_from_utf8(env("MYFOLDER_WEB", "web/dist")));
@@ -291,6 +292,7 @@ CREATE TABLE IF NOT EXISTS remote_grants (id INTEGER PRIMARY KEY,incoming_id TEX
     db.query("INSERT OR IGNORE INTO settings VALUES('server_id',?)", json::array({random_hex(16)}));
     db.raw("INSERT OR IGNORE INTO settings VALUES('server_name','MyFolder LAN')");
     db.query("INSERT OR IGNORE INTO settings VALUES('storage_limit',?)", json::array({std::to_string(DEFAULT_QUOTA)}));
+    initialize_auth(db);
 }
 
 static std::string setting(Db& db, const std::string& key) {
@@ -393,24 +395,27 @@ static std::pair<uint64_t, uint64_t> storage_stats(const Config& cfg) {
     return {bytes, count};
 }
 
-static std::string session_cookie(const httplib::Request& req) {
+static std::string request_cookie(const httplib::Request& req, const std::string& name) {
     auto cookie = req.get_header_value("Cookie");
     size_t start = 0;
     while (start < cookie.size()) {
         auto end = cookie.find(';', start);
         auto part = trim(cookie.substr(start, end == std::string::npos ? std::string::npos : end - start));
-        if (part.rfind("session=", 0) == 0) return part.substr(8);
+        if (part.rfind(name + "=", 0) == 0) return part.substr(name.size() + 1);
         if (end == std::string::npos) break;
         start = end + 1;
     }
     return {};
 }
+static std::string session_cookie(const httplib::Request& req) { return request_cookie(req, "session"); }
 static json identity(Db& db, const httplib::Request& req) {
     auto token = session_cookie(req);
     if (token.empty()) fail(401, "请先登录");
     auto user = db.one("SELECT u.id,u.username,u.role,u.is_superadmin,u.reset_until FROM sessions s "
-                       "JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>?",
-                       json::array({sha256(token), now()}));
+                       "JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? "
+                       "AND (s.device_id IS NULL OR EXISTS(SELECT 1 FROM trusted_devices d WHERE d.id=s.device_id "
+                       "AND d.status='approved' AND d.expires_at>? AND d.last_used_at>?))",
+                       json::array({sha256(token), now(), now(), now() - 30 * 86400}));
     if (user.is_null()) fail(401, "登录已失效");
     return user;
 }
@@ -428,6 +433,7 @@ static void response_json(httplib::Response& res, int code, const json& body) {
     res.set_header("Cache-Control", "no-store");
     res.set_header("X-Content-Type-Options", "nosniff");
 }
+#include "auth.h"
 static std::string logical_arg(const httplib::Request& req) {
     return clean_path(req.has_param("path") ? req.get_param_value("path") : "");
 }
@@ -815,13 +821,6 @@ void Service::file_actions(Db& db, const json& user, const httplib::Request& req
 void Service::account_actions(Db& db, const json& user, const httplib::Request& req, httplib::Response& res) {
     if (req.path == "/api/me" && req.method == "GET")
         return response_json(res, 200, public_user(user));
-    if (req.path == "/api/logout" && req.method == "POST") {
-        db.query("DELETE FROM sessions WHERE token_hash=? AND user_id=?",
-                 json::array({sha256(session_cookie(req)), user["id"]}));
-        response_json(res, 200, {{"ok", true}});
-        res.set_header("Set-Cookie", "session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0");
-        return;
-    }
     if (req.path == "/api/password" && req.method == "POST") {
         if (!user.value("reset_until", 0) || user.value("reset_until", 0) <= now())
             fail(403, "仅可在重置获批后的 30 分钟内修改密码");
@@ -829,6 +828,9 @@ void Service::account_actions(Db& db, const json& user, const httplib::Request& 
         if (password == "123456") fail(400, "新密码不能与临时密码相同");
         db.query("UPDATE users SET password=?,reset_until=0 WHERE id=?",
                  json::array({password_hash(password), user["id"]}));
+        revoke_user_devices(db, user["id"]);
+        issue_session(db, user, req, res);
+        auth_cookie(req, res, "mf_device", "", 0);
         return response_json(res, 200, {{"ok", true}});
     }
     fail(404, "接口不存在");
@@ -979,7 +981,7 @@ void Service::admin_actions(Db& db, const json& user, const httplib::Request& re
             if (decision == "approve") {
                 db.query("UPDATE users SET password=?,reset_until=? WHERE id=?",
                          json::array({hashed, now() + RESET_WINDOW, row["user_id"]}));
-                db.query("DELETE FROM sessions WHERE user_id=?", json::array({row["user_id"]}));
+                revoke_user_devices(db, row["user_id"]);
             }
             db.raw("COMMIT");
         } catch (...) { db.raw("ROLLBACK"); throw; }
@@ -1358,20 +1360,18 @@ void Service::dispatch(const httplib::Request& req, httplib::Response& res) {
     }
     check_origin(req);
     Db db(cfg_.db);
+    if (public_auth(db, req, res)) return;
     if (req.path == "/api/login" && req.method == "POST") {
+        auth_rate_limit(req, "password-login", 30, 900);
         auto body = json_body(req);
         auto name = as_string(body, "username"), password = as_string(body, "password");
+        if (password.size() > 1024) fail(400, "密码过长");
         auto row = db.one("SELECT * FROM users WHERE username=?", json::array({name}));
         if (row.is_null() || !verify_password(password, as_string(row, "password"))) fail(401, "用户名或密码错误");
         if (row.value("reset_until", 0) && row.value("reset_until", 0) <= now())
             fail(401, "临时密码已过期，请重新提交忘记密码申请");
-        auto token = b64(random_bytes(32));
-        for (char& c : token) { if (c == '+') c = '-'; else if (c == '/') c = '_'; }
-        token.erase(std::remove(token.begin(), token.end(), '='), token.end());
-        db.query("INSERT INTO sessions VALUES(?,?,?)", json::array({sha256(token), row["id"], now() + 86400}));
+        issue_session(db, row, req, res);
         response_json(res, 200, public_user(row));
-        res.set_header("Set-Cookie", "session=" + token + "; Path=/; HttpOnly; SameSite=Strict" +
-                                     (req.get_header_value("X-Forwarded-Proto") == "https" ? "; Secure" : ""));
         return;
     }
     if (req.path == "/api/password-requests" && req.method == "POST") {
@@ -1386,6 +1386,7 @@ void Service::dispatch(const httplib::Request& req, httplib::Response& res) {
     }
     if (req.path.rfind("/api/peer/", 0) == 0) return peer_actions(db, req, res);
     auto user = identity(db, req);
+    if (authenticated_auth(db, user, req, res)) return;
     if (req.path == "/api/me" || req.path == "/api/logout" || req.path == "/api/password")
         return account_actions(db, user, req, res);
     if (req.path.rfind("/api/remote/", 0) == 0) return proxy_actions(db, user, req, res);
@@ -1440,11 +1441,16 @@ static httplib::Request adapt_request(const drogon::HttpRequestPtr& input, bool 
     default: req.method = "OTHER"; break;
     }
     req.path = input->getPath();
+    req.remote_addr = input->peerAddr().toIp();
     req.target = req.path + (input->getQuery().empty() ? "" : "?" + input->getQuery());
     for (const auto& [key, value] : input->getHeaders()) req.headers.emplace(key, value);
     req.headers.erase("Cookie");
-    if (!input->getCookie("session").empty())
-        req.headers.emplace("Cookie", "session=" + input->getCookie("session"));
+    std::string cookies;
+    for (const auto& name : {"session", "mf_device", "mf_registration"}) {
+        const auto& value = input->getCookie(name);
+        if (!value.empty()) cookies += (cookies.empty() ? "" : "; ") + std::string(name) + "=" + value;
+    }
+    if (!cookies.empty()) req.headers.emplace("Cookie", cookies);
     for (const auto& [key, value] : input->getParameters()) req.params.emplace(key, value);
     if (!upload && input->bodyLength() <= MAX_JSON)
         req.body.assign(input->bodyData(), input->bodyLength());
@@ -1544,6 +1550,24 @@ static drogon::HttpResponsePtr adapt_response(httplib::Response& source,
     result->setStatusCode(static_cast<drogon::HttpStatusCode>(source.status > 0 ? source.status : 200));
     for (const auto& [key, value] : source.headers) {
         if (lower_ascii(key) == "content-type") result->setContentTypeString(value);
+        else if (lower_ascii(key) == "set-cookie") {
+            // addHeader(name,value) overwrites duplicate headers; cookies must be added separately.
+            std::istringstream parts(value);
+            std::string part;
+            std::getline(parts, part, ';');
+            auto equal = part.find('=');
+            drogon::Cookie cookie(part.substr(0, equal), part.substr(equal + 1));
+            cookie.setHttpOnly(false);
+            while (std::getline(parts, part, ';')) {
+                part = trim(part);
+                if (part == "HttpOnly") cookie.setHttpOnly(true);
+                else if (part == "Secure") cookie.setSecure(true);
+                else if (part == "SameSite=Strict") cookie.setSameSite(drogon::Cookie::SameSite::kStrict);
+                else if (part.rfind("Path=", 0) == 0) cookie.setPath(part.substr(5));
+                else if (part.rfind("Max-Age=", 0) == 0) cookie.setMaxAge(std::stoi(part.substr(8)));
+            }
+            result->addCookie(cookie);
+        }
         else result->addHeader(key, value);
     }
     if (streaming) {

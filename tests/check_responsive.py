@@ -27,6 +27,10 @@ def fixture(route):
             "storage_limit": 5 * 1024**3, "storage_used": 1024**3, "file_count": 42,
             "remotes": [{"id": 7, "remote_name": "外连服务器_" + "remote-" * 12, "status": "approved"}]}
     bodies = {
+        "/api/auth/options": {"registration": True, "trusted_login": True, "secure_transport": False, "device_days": 90},
+        "/api/trusted-devices": {"devices": [{"id": 1, "user_id": 1, "name": "个人工作电脑的浏览器_" + "browser-" * 10, "status": "approved", "created_at": 1700000000, "expires_at": 1900000000, "last_used_at": 1700000000, "reviewed_at": 1700000000, "current": True}], "trusted_login": True, "secure_transport": False},
+        "/api/admin/registrations": {"requests": [{"id": 1, "username": "new_member", "device_name": "申请设备_" + "device-" * 12, "trust_device": 1, "status": "pending", "created_at": 1700000000, "expires_at": 1900000000, "reviewed_at": None}]},
+        "/api/admin/trusted-devices": {"devices": [{"id": 1, "user_id": 2, "username": "测试成员", "name": "待审核设备_" + "device-" * 12, "status": "pending", "created_at": 1700000000, "expires_at": 1900000000, "last_used_at": 1700000000, "reviewed_at": None}]},
         "/api/me": user, "/api/login": user, "/api/server-info": info,
         "/api/users": {"users": [user, {"id": 2, "username": "测试成员", "role": "user", "reset_until": 0}]},
         "/api/grants": {"grants": [{"id": 1, "user_id": 2, "path": LONG_FOLDER,
@@ -38,6 +42,9 @@ def fixture(route):
         "/api/remotes/incoming": {"incoming": [{"id": "remote-1", "source_name": "演示申请服务器",
                                                   "created_at": 1700000000, "status": "pending", "grants": []}]},
     }
+    if endpoint == "/api/registration/status":
+        route.fulfill(status=404, content_type="application/json", body='{"error":"No registration"}')
+        return
     if endpoint.endswith("/list"):
         path = parse_qs(parsed.query).get("path", [""])[0]
         body = {"path": path, "permissions": PERMISSIONS, "items": [
@@ -106,7 +113,7 @@ def main():
             assert_fits(page, f"breadcrumb-{width}")
             page.evaluate("scrollTo(0, 0)")
             page.screenshot(path=str(artifacts / f"files-{width}.png"), full_page=True)
-            for label in ["服务器信息", "用户与权限", "外连服务器"]:
+            for label in ["服务器信息", "登录设备", "用户与权限", "外连服务器"]:
                 navigate(page, mobile, label)
                 assert_fits(page, f"{label}-{width}")
                 if mobile:
@@ -139,6 +146,11 @@ def main():
             page.get_by_role("button", name="忘记密码？").click()
             expect(page.get_by_role("heading", name="忘记密码", exact=True)).to_be_visible()
             assert_fits(page, f"forgot-{width}")
+            page.get_by_role("button", name="返回登录").click()
+            page.get_by_role("button", name="申请注册", exact=True).click()
+            expect(page.get_by_role("heading", name="申请注册", exact=True)).to_be_visible()
+            assert_fits(page, f"registration-{width}")
+            page.screenshot(path=str(artifacts / f"registration-{width}.png"), full_page=True)
             assert not errors, errors
             results.append({"width": width, "height": height, "status": "passed"})
             context.close()

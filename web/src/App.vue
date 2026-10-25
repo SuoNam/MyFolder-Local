@@ -9,8 +9,9 @@ import AdminView from './views/AdminView.vue'
 import InfoView from './views/InfoView.vue'
 import RemotesView from './views/RemotesView.vue'
 import PasswordView from './views/PasswordView.vue'
+import TrustedDevicesView from './views/TrustedDevicesView.vue'
 
-type Page = 'files' | 'admin' | 'info' | 'remotes' | 'password'
+type Page = 'files' | 'admin' | 'info' | 'remotes' | 'password' | 'trusted'
 const user = ref<User | null>(null)
 const info = ref<ServerInfo | null>(null)
 const active = ref<Page>('files')
@@ -24,7 +25,7 @@ const navigation = ref<HTMLElement | null>(null)
 const menuToggle = ref<HTMLButtonElement | null>(null)
 const menuClose = ref<HTMLButtonElement | null>(null)
 let previousOverflow = ''
-const pageLabel = computed(() => ({ files: '文件区', info: '服务器信息', admin: '用户与权限', remotes: '外连服务器', password: '修改密码' })[active.value])
+const pageLabel = computed(() => ({ files: '文件区', info: '服务器信息', admin: '用户与权限', remotes: '外连服务器', password: '修改密码', trusted: '登录设备' })[active.value])
 const remoteId = computed(() => typeof serverChoice.value === 'number' ? serverChoice.value : null)
 const serverName = computed(() => remoteId.value == null ? (info.value?.name || '本服务器')
   : info.value?.remotes.find(item => item.id === remoteId.value)?.remote_name || '外连服务器')
@@ -66,9 +67,18 @@ function onNavigationKeydown(event: KeyboardEvent) {
   if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus() }
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus() }
 }
-onMounted(() => mobileQuery.addEventListener('change', onViewportChange))
+function sessionExpired() {
+  if (!user.value) return
+  user.value = null; info.value = null; active.value = 'files'; serverChoice.value = 'local'
+  closeNavigation(false)
+}
+onMounted(() => {
+  mobileQuery.addEventListener('change', onViewportChange)
+  window.addEventListener('myfolder-session-expired', sessionExpired)
+})
 onBeforeUnmount(() => {
   mobileQuery.removeEventListener('change', onViewportChange)
+  window.removeEventListener('myfolder-session-expired', sessionExpired)
   closeNavigation(false)
 })
 
@@ -126,6 +136,7 @@ async function logout() {
         <button type="button" class="nav-item" :class="{ 'is-active': active === 'files' }" @click="navigate('files')"><Icon name="folder" /><span>文件区</span></button>
         <div class="lan-server-picker"><label class="label" for="server-choice">当前服务器</label><SelectMenu id="server-choice" :model-value="serverChoice" :options="serverOptions" @update:model-value="selectServer" /></div>
         <button type="button" class="nav-item" :class="{ 'is-active': active === 'info' }" @click="navigate('info')"><Icon name="server" /><span>服务器信息</span></button>
+        <button type="button" class="nav-item" :class="{ 'is-active': active === 'trusted' }" @click="navigate('trusted')"><Icon name="lock" /><span>登录设备</span></button>
         <button v-if="user.role !== 'user'" type="button" class="nav-item" :class="{ 'is-active': active === 'admin' }" @click="navigate('admin')"><Icon name="shield" /><span>用户与权限</span></button>
         <button v-if="user.role === 'superadmin'" type="button" class="nav-item" :class="{ 'is-active': active === 'remotes' }" @click="navigate('remotes')"><Icon name="devices" /><span>外连服务器</span></button>
         <button v-if="user.reset_until > Date.now() / 1000" type="button" class="nav-item" :class="{ 'is-active': active === 'password' }" @click="navigate('password')"><Icon name="lock" /><span>修改密码</span></button>
@@ -136,6 +147,7 @@ async function logout() {
       <FilesView v-if="active === 'files'" :key="`${user.id}-${serverChoice}`" :remote-id="remoteId" :server-name="serverName" />
       <AdminView v-else-if="active === 'admin' && user.role !== 'user'" :current-user="user" />
       <InfoView v-else-if="active === 'info'" :role="user.role" @updated="info = $event" />
+      <TrustedDevicesView v-else-if="active === 'trusted'" />
       <RemotesView v-else-if="active === 'remotes' && user.role === 'superadmin'" @updated="refreshInfo" />
       <PasswordView v-else-if="active === 'password'" :user="user" @changed="user = $event; active = 'files'" />
     </div>

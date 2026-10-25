@@ -1,4 +1,14 @@
 .startup { min-height: 100vh; display: flex; align-items: center; justify-content: center; gap: 12px; color: var(--muted); font-family: var(--data); }
+.lan-auth-links { display: flex; justify-content: space-between; gap: 12px; margin-top: 10px; }
+.lan-trust-choice { display: flex; align-items: center; gap: 9px; margin: 15px 0 7px; font-size: 12px; min-height: 44px; }
+.lan-trust-choice input { width: 18px; height: 18px; accent-color: var(--signal); }
+.lan-registration-status { padding: 14px; margin: 0 0 18px; overflow-wrap: anywhere; }
+.lan-registration-status strong { font-size: 13px; }
+.lan-registration-status .sub { margin: 8px 0 12px; }
+.lan-device-request { display: flex; align-items: end; gap: 12px; flex-wrap: wrap; }
+.lan-device-request > div { flex: 1 1 220px; min-width: 0; }
+.lan-trust-help { padding: 0 14px 14px; margin-top: 14px; }
+.lan-account-approvals { margin-bottom: 18px; }
 .mobile-appbar, .mobile-navigation-close { display: none; }
 .mobile-action-label { display: none; }
 .lan-shell .card, .lan-shell .card-head, .lan-shell .card-pad { min-width: 0; }

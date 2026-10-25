@@ -1,5 +1,9 @@
 export type Permission = 'upload' | 'download' | 'modify' | 'delete'
 export type User = { id: number; username: string; role: 'superadmin' | 'admin' | 'user'; reset_until: number }
+export type AuthOptions = { registration: boolean; trusted_login: boolean; secure_transport: boolean; device_days: number }
+export type RegistrationStatus = { username: string; status: 'pending' | 'approved' | 'rejected' | 'expired'; claimed?: boolean }
+export type RegistrationRequest = RegistrationStatus & { id: number; device_name: string; trust_device: number; created_at: number; expires_at: number; reviewed_at: number | null }
+export type TrustedDevice = { id: number; user_id: number; name: string; status: 'pending' | 'approved' | 'rejected' | 'revoked' | 'expired'; created_at: number; expires_at: number; last_used_at: number; reviewed_at: number | null; username?: string; role?: User['role']; current?: boolean }
 export type FileEntry = { name: string; path: string; directory: boolean; size: number | null; modified: number; permissions: Permission[] }
 export type FileList = { path: string; permissions: Permission[]; items: FileEntry[] }
 export type Grant = { id: number; user_id: number; path: string; upload: number; download: number; modify: number; delete_allowed: number }
@@ -13,10 +17,28 @@ export class ApiError extends Error {
   constructor(message: string, public status: number) { super(message) }
 }
 
+let renewal: Promise<boolean> | null = null
+async function renewDeviceSession(): Promise<boolean> {
+  if (!renewal) renewal = (async () => {
+    try {
+      const result = await fetch('/api/auth/device-login', { credentials: 'same-origin', method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      if (result.status === 409) return (await fetch('/api/me', { credentials: 'same-origin' })).ok
+      return result.ok
+    } catch { return false }
+  })().finally(() => { renewal = null })
+  return renewal
+}
 async function request<T>(endpoint: string, options?: RequestInit): Promise<T> {
   let response: Response
   try { response = await fetch('/api/' + endpoint, { credentials: 'same-origin', ...options }) }
   catch { throw new ApiError('无法连接到内网服务，请检查网络连接', 0) }
+  if (response.status === 401 && !['login', 'logout', 'register', 'password-requests'].includes(endpoint) && !endpoint.startsWith('auth/') && !endpoint.startsWith('registration/')) {
+    if (await renewDeviceSession()) {
+      try { response = await fetch('/api/' + endpoint, { credentials: 'same-origin', ...options }) }
+      catch { throw new ApiError('无法连接到内网服务，请检查网络连接', 0) }
+    }
+    if (response.status === 401) window.dispatchEvent(new Event('myfolder-session-expired'))
+  }
   const body = await response.json().catch(() => ({})) as { error?: string }
   if (!response.ok) throw new ApiError(body.error || `请求失败（${response.status}）`, response.status)
   return body as T
@@ -31,6 +53,18 @@ const params = (values: Record<string, string | number>) => new URLSearchParams(
 const fileEndpoint = (operation: string, remoteId?: number | null) => remoteId == null ? operation : `remote/${remoteId}/${operation}`
 
 export const api = {
+  authOptions: () => request<AuthOptions>('auth/options'),
+  register: (username: string, password: string, device_name: string, trust_device: boolean) => request<RegistrationStatus>('register', json('POST', { username, password, device_name, trust_device })),
+  registrationStatus: () => request<RegistrationStatus>('registration/status'),
+  activateRegistration: () => request<User>('registration/activate', json('POST', {})),
+  restoreDeviceLogin: () => request<User>('auth/device-login', json('POST', {})),
+  registrations: () => request<{ requests: RegistrationRequest[] }>('admin/registrations'),
+  reviewRegistration: (id: number, decision: 'approve' | 'reject') => request<{ ok: boolean }>('admin/registrations/review', json('POST', { id, decision })),
+  trustedDevices: () => request<{ devices: TrustedDevice[]; trusted_login: boolean; secure_transport: boolean }>('trusted-devices'),
+  requestTrustedDevice: (device_name: string) => request<TrustedDevice>('trusted-devices/request', json('POST', { device_name })),
+  revokeTrustedDevice: (id: number) => request<{ ok: boolean }>('trusted-devices/revoke', json('POST', { id })),
+  deviceRequests: () => request<{ devices: TrustedDevice[] }>('admin/trusted-devices'),
+  reviewTrustedDevice: (id: number, decision: 'approve' | 'reject') => request<{ ok: boolean }>('admin/trusted-devices/review', json('POST', { id, decision })),
   me: () => request<User>('me'),
   login: (username: string, password: string) => request<User>('login', json('POST', { username, password })),
   logout: () => request<{ ok: boolean }>('logout', { method: 'POST' }),

@@ -117,6 +117,11 @@ MYFOLDER_PORT=8080
 MYFOLDER_MAX_UPLOADS=2
 MYFOLDER_IO_WORKERS=4
 MYFOLDER_MAX_REQUEST_GIB=5
+# HTTP works by default, including approved trusted-browser login. HTTPS is optional.
+# Optional: require HTTPS only for trusted-browser login (not for password login).
+# MYFOLDER_REQUIRE_HTTPS_DEVICE_LOGIN=1
+# If using an HTTPS reverse proxy, list its source IPs for secure cookies.
+# MYFOLDER_TRUSTED_PROXY_IPS=127.0.0.1,::1
 """
     control_tar = tar_bytes([
         ("./control", control, 0o644),
@@ -132,7 +137,7 @@ MYFOLDER_MAX_REQUEST_GIB=5
     if binary:
         files.append(("./opt/myfolder-lan/bin/myfolder-lan", Path(binary).read_bytes(), 0o755))
     else:
-        for relative in ("CMakeLists.txt", "src/main.cpp", "third_party/httplib.h", "third_party/httplib.LICENSE",
+        for relative in ("CMakeLists.txt", "src/main.cpp", "src/auth.h", "third_party/httplib.h", "third_party/httplib.LICENSE",
                          "third_party/json.hpp", "third_party/json.LICENSE"):
             files.append((f"./opt/myfolder-lan/cpp/{relative}", (BASE / "cpp" / relative).read_bytes(), 0o644))
     web_dist = BASE / "web" / "dist"

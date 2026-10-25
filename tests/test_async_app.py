@@ -16,14 +16,21 @@ BASE = Path(__file__).resolve().parents[1]
 
 
 class Node:
-    def __init__(self):
+    def __init__(self, extra_env=None, port=None):
         self.temp = tempfile.TemporaryDirectory()
         self.data = Path(self.temp.name)
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
             self.port = listener.getsockname()[1]
+        if port is not None:
+            self.port = port
         env = dict(os.environ, MYFOLDER_DATA=str(self.data), MYFOLDER_HOST="127.0.0.1",
                    MYFOLDER_PORT=str(self.port), MYFOLDER_WEB=str(BASE / "web" / "dist"))
+        # Default-mode tests must not inherit an operator's optional HTTPS policy or proxy list.
+        for option in ('MYFOLDER_REQUIRE_HTTPS_DEVICE_LOGIN', 'MYFOLDER_TRUSTED_PROXY_IPS',
+                       'MYFOLDER_ALLOW_INSECURE_DEVICE_LOGIN'):
+            env.pop(option, None)
+        env.update(extra_env or {})
         default_binary = BASE / "cpp" / "build" / ("Release/myfolder-lan.exe" if os.name == "nt" else "myfolder-lan")
         command = [env.get("MYFOLDER_CPP_BINARY", str(default_binary))]
         initialized = subprocess.run(command + ["--init-admin"], cwd=BASE, env=env,
