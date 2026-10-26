@@ -1,14 +1,21 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
-import { api, type TrustedDevice } from '../api'
-import { authStatus, authTime } from '../lib/auth'
+import { computed, onMounted, ref } from 'vue'
+import { api, type BrowserLoginState, type TrustedDevice } from '../api'
+import { authStatus, authTime, browserLoginMessage } from '../lib/auth'
 
 const devices = ref<TrustedDevice[]>([]), available = ref(false), busy = ref(false)
 const secureTransport = ref(false)
+const loaded = ref(false)
+const currentBrowser = computed(() => devices.value.find(device => device.current))
+const emit = defineEmits<{ state: [state: BrowserLoginState] }>()
 const name = ref('我的浏览器'), error = ref(''), notice = ref(''), revoking = ref<TrustedDevice | null>(null)
 async function refresh() {
   error.value = ''
-  try { const result = await api.trustedDevices(); devices.value = result.devices; available.value = result.trusted_login; secureTransport.value = result.secure_transport }
+  try {
+    const result = await api.trustedDevices()
+    devices.value = result.devices; available.value = result.trusted_login; secureTransport.value = result.secure_transport; loaded.value = true
+    emit('state', !available.value ? 'https_required' : currentBrowser.value?.status || 'missing')
+  }
   catch (e) { error.value = e instanceof Error ? e.message : '读取失败' }
 }
 async function request() {
@@ -33,6 +40,7 @@ onMounted(refresh)
     <div class="page-head"><div><h1 class="h1">登录设备</h1><p class="sub">管理员批准后，同一浏览器可免密进入；不会采集或依赖 MAC 地址。</p></div></div>
     <p v-if="error" class="lan-message is-error" role="alert">{{ error }}<button aria-label="关闭错误提示" @click="error = ''">×</button></p>
     <p v-if="notice" class="lan-message is-ok" role="status">{{ notice }}<button aria-label="关闭成功提示" @click="notice = ''">×</button></p>
+    <p v-if="loaded" class="lan-message" :class="available && currentBrowser?.status === 'approved' ? 'is-ok' : 'is-warn'" role="status" aria-label="当前浏览器免密状态">{{ browserLoginMessage[!available ? 'https_required' : currentBrowser?.status || 'missing'] }}</p>
     <section class="card"><div class="card-head"><h2 class="h3">申请当前浏览器免密</h2></div>
       <form class="card-pad lan-device-request" @submit.prevent="request">
         <div><label class="label" for="trusted-device-name">设备名称</label><div class="field"><input id="trusted-device-name" v-model="name" required maxlength="40" placeholder="例如：办公室电脑的 Chrome" /></div></div>

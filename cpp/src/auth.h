@@ -106,6 +106,65 @@ static bool may_review_device(const json& actor, const json& target) {
     return role_of(actor) == "superadmin" || (role_of(actor) == "admin" && as_string(target, "role") == "user");
 }
 
+// Caller holds BEGIN IMMEDIATE and has verified this receipt's ownership, approval and expiry.
+static json claim_registration(Db& db, const json& row, const json& user,
+                               const httplib::Request& req, httplib::Response& res) {
+    json device_id = nullptr;
+    if (row.value("trust_device", 0)) {
+        require_device_transport(req);
+        auto token = random_hex(32);
+        db.query("INSERT INTO trusted_devices(user_id,name,token_hash,status,created_at,expires_at,last_used_at,reviewed_at,reviewer_id) VALUES(?,?,?,'approved',?,?,?,?,?)",
+                 json::array({user["id"], row["device_name"], sha256(token), now(), now() + DEVICE_TTL, now(), row["reviewed_at"], row["reviewer_id"]}));
+        device_id = db.id();
+        auth_cookie(req, res, "mf_device", token, DEVICE_TTL);
+    }
+    db.query("UPDATE registration_requests SET claimed_at=? WHERE id=?", json::array({now(), row["id"]}));
+    return device_id;
+}
+
+static json password_login(Db& db, const json& user, const httplib::Request& req, httplib::Response& res) {
+    json device_id = nullptr;
+    std::string state = "missing";
+    bool claimed = false;
+    db.raw("BEGIN IMMEDIATE");
+    try {
+        const auto current = db.one("SELECT password,reset_until FROM users WHERE id=?", json::array({user["id"]}));
+        if (current.is_null() || current["password"] != user["password"] || current["reset_until"] != user["reset_until"])
+            fail(401, "账号状态已变化，请重新登录");
+        const auto receipt = request_cookie(req, "mf_registration");
+        const auto registration = db.one("SELECT * FROM registration_requests WHERE receipt_hash=?",
+                                         json::array({sha256(receipt)}));
+        if (!receipt.empty() && !registration.is_null() && registration["user_id"] == user["id"] &&
+            registration["status"] == "approved" && registration["claimed_at"].is_null() &&
+            as_int(registration, "expires_at") > now() && !user.value("reset_until", 0)) {
+            if (!registration.value("trust_device", 0) || device_login_available(req)) {
+                device_id = claim_registration(db, registration, user, req, res);
+                claimed = true;
+            } else state = "https_required"; // Password login stays available; keep the approved receipt unclaimed.
+        }
+        if (device_id.is_null() && !user.value("reset_until", 0)) {
+            const auto token = request_cookie(req, "mf_device");
+            const auto device = db.one("SELECT * FROM trusted_devices WHERE user_id=? AND token_hash=?",
+                                       json::array({user["id"], sha256(token)}));
+            if (!token.empty() && !device.is_null()) {
+                state = as_string(device_public(device), "status");
+                if (state == "approved") {
+                    if (device_login_available(req)) {
+                        device_id = device["id"];
+                        db.query("UPDATE trusted_devices SET last_used_at=? WHERE id=?", json::array({now(), device_id}));
+                    } else state = "https_required";
+                }
+            }
+        }
+        issue_session(db, user, req, res, device_id);
+        db.raw("COMMIT");
+    } catch (...) { db.raw("ROLLBACK"); throw; }
+    if (claimed) auth_cookie(req, res, "mf_registration", "", 0);
+    auto result = public_user(user);
+    result["browser_login"] = device_id.is_null() ? state : "approved";
+    return result;
+}
+
 static bool public_auth(Db& db, const httplib::Request& req, httplib::Response& res) {
     if (req.path == "/api/logout" && req.method == "POST") {
         // Even an expired session must be able to forget this browser's persistent credential.
@@ -180,20 +239,13 @@ static bool public_auth(Db& db, const httplib::Request& req, httplib::Response& 
             if (!row["claimed_at"].is_null()) fail(409, "已领取登录资格，请使用账号密码登录");
             auto user = db.one("SELECT * FROM users WHERE id=?", json::array({row["user_id"]}));
             if (user.is_null() || user.value("reset_until", 0)) fail(401, "账号状态已变化，请使用密码登录");
-            json device_id = nullptr;
-            if (row.value("trust_device", 0)) {
-                require_device_transport(req);
-                auto token = random_hex(32);
-                db.query("INSERT INTO trusted_devices(user_id,name,token_hash,status,created_at,expires_at,last_used_at,reviewed_at,reviewer_id) VALUES(?,?,?,'approved',?,?,?,?,?)",
-                         json::array({user["id"], row["device_name"], sha256(token), now(), now() + DEVICE_TTL, now(), row["reviewed_at"], row["reviewer_id"]}));
-                device_id = db.id();
-                auth_cookie(req, res, "mf_device", token, DEVICE_TTL);
-            }
-            db.query("UPDATE registration_requests SET claimed_at=? WHERE id=?", json::array({now(), row["id"]}));
+            auto device_id = claim_registration(db, row, user, req, res);
             issue_session(db, user, req, res, device_id);
             db.raw("COMMIT");
             auth_cookie(req, res, "mf_registration", "", 0);
-            response_json(res, 200, public_user(user));
+            auto result = public_user(user);
+            result["browser_login"] = device_id.is_null() ? "missing" : "approved";
+            response_json(res, 200, result);
         } catch (...) { db.raw("ROLLBACK"); throw; }
         return true;
     }

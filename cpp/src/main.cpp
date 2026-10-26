@@ -1370,8 +1370,7 @@ void Service::dispatch(const httplib::Request& req, httplib::Response& res) {
         if (row.is_null() || !verify_password(password, as_string(row, "password"))) fail(401, "用户名或密码错误");
         if (row.value("reset_until", 0) && row.value("reset_until", 0) <= now())
             fail(401, "临时密码已过期，请重新提交忘记密码申请");
-        issue_session(db, row, req, res);
-        response_json(res, 200, public_user(row));
+        response_json(res, 200, password_login(db, row, req, res));
         return;
     }
     if (req.path == "/api/password-requests" && req.method == "POST") {

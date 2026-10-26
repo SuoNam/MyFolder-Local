@@ -45,7 +45,11 @@
 .lan-message { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; margin: 0 0 14px; border: 1px solid; border-radius: var(--r-sm); font-size: 12px; }
 .lan-message.is-error { color: var(--alert); background: var(--alert-wash); border-color: #eccec9; }
 .lan-message.is-ok { color: var(--signal-deep); background: var(--signal-wash); border-color: #c4e7d7; }
+.lan-message.is-warn { color: #805600; background: #fff8e6; border-color: #ead49b; }
+.lan-login-status { margin: 16px 20px 0; flex-wrap: wrap; }
+.lan-login-status > span { flex: 1 1 240px; min-width: 0; }
 .lan-message button { border: 0; background: transparent; color: inherit; cursor: pointer; font-size: 18px; line-height: 1; }
+.lan-login-status .btn { border: 1px solid currentColor; font-size: 12px; line-height: 1.2; flex-shrink: 0; }
 .lan-admin-grid { display: grid; grid-template-columns: minmax(270px, .75fr) minmax(380px, 1.25fr); gap: 14px; margin-bottom: 14px; }
 .lan-form { display: grid; gap: 8px; }
 .lan-form .label { margin: 3px 0 0; }

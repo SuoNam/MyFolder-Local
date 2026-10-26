@@ -1,5 +1,6 @@
 export type Permission = 'upload' | 'download' | 'modify' | 'delete'
-export type User = { id: number; username: string; role: 'superadmin' | 'admin' | 'user'; reset_until: number }
+export type BrowserLoginState = 'approved' | 'pending' | 'rejected' | 'revoked' | 'expired' | 'missing' | 'https_required'
+export type User = { id: number; username: string; role: 'superadmin' | 'admin' | 'user'; reset_until: number; browser_login?: BrowserLoginState }
 export type AuthOptions = { registration: boolean; trusted_login: boolean; secure_transport: boolean; device_days: number }
 export type RegistrationStatus = { username: string; status: 'pending' | 'approved' | 'rejected' | 'expired'; claimed?: boolean }
 export type RegistrationRequest = RegistrationStatus & { id: number; device_name: string; trust_device: number; created_at: number; expires_at: number; reviewed_at: number | null }

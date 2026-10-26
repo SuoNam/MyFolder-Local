@@ -21,7 +21,7 @@ def fixture(route):
     request = route.request
     parsed = urlsplit(request.url)
     endpoint = parsed.path
-    user = {"id": 1, "username": "演示管理员", "role": "superadmin", "reset_until": 0}
+    user = {"id": 1, "username": "演示管理员", "role": "superadmin", "reset_until": 0, "browser_login": "approved"}
     info = {"name": "MyFolder 移动端布局验证服务器", "server_id": "fixture-server",
             "storage_path": "/var/lib/myfolder-lan/storage/" + "shared-project/" * 10,
             "storage_limit": 5 * 1024**3, "storage_used": 1024**3, "file_count": 42,
@@ -151,6 +151,13 @@ def main():
             expect(page.get_by_role("heading", name="申请注册", exact=True)).to_be_visible()
             assert_fits(page, f"registration-{width}")
             page.screenshot(path=str(artifacts / f"registration-{width}.png"), full_page=True)
+            page.get_by_role("button", name="返回登录", exact=True).click()
+            page.locator("#acct").fill("fixture_admin")
+            page.locator("#pwd").fill("Disposable-test-password")
+            page.get_by_role("button", name="登录", exact=True).click()
+            expect(page.locator(".lan-login-status")).to_contain_text("此浏览器免密已开启")
+            assert_fits(page, f"login-status-{width}")
+            page.screenshot(path=str(artifacts / f"login-status-{width}.png"), full_page=True)
             assert not errors, errors
             results.append({"width": width, "height": height, "status": "passed"})
             context.close()

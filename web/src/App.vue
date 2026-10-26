@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { api, type ServerInfo, type User } from './api'
+import { api, type BrowserLoginState, type ServerInfo, type User } from './api'
+import { browserLoginMessage } from './lib/auth'
 import Icon from './components/Icon.vue'
 import SelectMenu from './components/SelectMenu.vue'
 import LoginView from './views/LoginView.vue'
@@ -18,6 +19,7 @@ const active = ref<Page>('files')
 const serverChoice = ref<string | number>('local')
 const loading = ref(true)
 const logoutError = ref('')
+const loginState = ref<BrowserLoginState | ''>('')
 const mobileQuery = window.matchMedia('(max-width: 760px)')
 const isMobile = ref(mobileQuery.matches)
 const navigationOpen = ref(false)
@@ -69,7 +71,7 @@ function onNavigationKeydown(event: KeyboardEvent) {
 }
 function sessionExpired() {
   if (!user.value) return
-  user.value = null; info.value = null; active.value = 'files'; serverChoice.value = 'local'
+  user.value = null; info.value = null; active.value = 'files'; serverChoice.value = 'local'; loginState.value = ''
   closeNavigation(false)
 }
 onMounted(() => {
@@ -96,6 +98,7 @@ onMounted(async () => {
 
 function signedIn(next: User) {
   user.value = next
+  loginState.value = next.browser_login || ''
   active.value = next.reset_until > Date.now() / 1000 ? 'password' : 'files'
   void refreshInfo()
 }
@@ -109,6 +112,7 @@ async function logout() {
   try { await api.logout() }
   catch (error) { logoutError.value = error instanceof Error ? error.message : '退出失败'; return }
   user.value = null
+  loginState.value = ''
   info.value = null
   active.value = 'files'
   serverChoice.value = 'local'
@@ -144,10 +148,15 @@ async function logout() {
       <div class="rail-foot"><div class="me"><div class="me-av">{{ user.username.slice(0, 2).toUpperCase() }}</div><div class="me-info"><div class="me-name">{{ user.username }}</div><div class="me-sub"><span class="led is-on" />{{ roleLabel(user.role) }} · 内网已连接</div></div></div><p v-if="logoutError" class="sub is-error">{{ logoutError }}</p><button type="button" class="btn btn-quiet rail-logout" @click="logout"><Icon name="logout" />退出登录</button></div>
     </nav>
     <div class="main" :inert="isMobile && navigationOpen">
+      <section v-if="loginState && active !== 'trusted' && !user.reset_until" class="lan-message lan-login-status" :class="loginState === 'approved' ? 'is-ok' : 'is-warn'" role="status" aria-label="当前浏览器登录状态">
+        <span>{{ browserLoginMessage[loginState] }}</span>
+        <button class="btn btn-sm" @click="navigate('trusted')">查看免密状态</button>
+        <button aria-label="关闭登录状态提示" @click="loginState = ''">×</button>
+      </section>
       <FilesView v-if="active === 'files'" :key="`${user.id}-${serverChoice}`" :remote-id="remoteId" :server-name="serverName" />
       <AdminView v-else-if="active === 'admin' && user.role !== 'user'" :current-user="user" />
       <InfoView v-else-if="active === 'info'" :role="user.role" @updated="info = $event" />
-      <TrustedDevicesView v-else-if="active === 'trusted'" />
+      <TrustedDevicesView v-else-if="active === 'trusted'" @state="loginState = $event" />
       <RemotesView v-else-if="active === 'remotes' && user.role === 'superadmin'" @updated="refreshInfo" />
       <PasswordView v-else-if="active === 'password'" :user="user" @changed="user = $event; active = 'files'" />
     </div>
