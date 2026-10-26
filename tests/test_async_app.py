@@ -67,6 +67,9 @@ class Node:
         response = connection.getresponse()
         normalized = {"-".join(part.capitalize() for part in key.split("-")): value
                       for key, value in response.getheaders()}
+        for key, value in response.getheaders():
+            if key.lower() == 'set-cookie' and value.startswith('session='):
+                normalized['Set-Cookie'] = value
         result = response.status, normalized, response.read()
         connection.close()
         return result

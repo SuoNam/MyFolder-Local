@@ -1,7 +1,7 @@
 // Included after the shared DB/HTTP helpers in main.cpp. Credentials never enter JSON responses.
 static constexpr int REGISTRATION_TTL = 7 * 86400;
 static constexpr int DEVICE_TTL = 90 * 86400;
-static constexpr int DEVICE_IDLE_TTL = 30 * 86400;
+static constexpr int DEVICE_IDLE_TTL = DEVICE_TTL;
 
 static void initialize_auth(Db& db) {
     db.raw(R"SQL(
@@ -106,23 +106,48 @@ static bool may_review_device(const json& actor, const json& target) {
     return role_of(actor) == "superadmin" || (role_of(actor) == "admin" && as_string(target, "role") == "user");
 }
 
+// Called inside a transaction after password authentication or approved registration activation.
+static json remember_browser(Db& db, const json& user, const httplib::Request& req,
+                             httplib::Response& res, const std::string& name) {
+    require_device_transport(req);
+    const auto token = random_hex(32);
+    const auto existing = db.one("SELECT * FROM trusted_devices WHERE user_id=? AND token_hash=?",
+                                 json::array({user["id"], sha256(request_cookie(req, "mf_device"))}));
+    json id;
+    if (!existing.is_null() && device_public(existing)["status"] == "approved") {
+        id = existing["id"];
+        db.query("UPDATE trusted_devices SET name=?,token_hash=?,previous_hash=NULL,previous_until=0,expires_at=?,last_used_at=? WHERE id=?",
+                 json::array({name, sha256(token), now() + DEVICE_TTL, now(), id}));
+    } else {
+        // Keep at most 20 active browsers. Retain the old row as an audit record, never revive revoked tokens.
+        auto active = db.query("SELECT id FROM trusted_devices WHERE user_id=? AND status='approved' AND expires_at>? ORDER BY last_used_at DESC,id DESC",
+                               json::array({user["id"], now()}));
+        for (size_t index = 19; index < active.size(); ++index) {
+            db.query("UPDATE trusted_devices SET status='revoked',previous_hash=NULL,previous_until=0 WHERE id=?", json::array({active[index]["id"]}));
+            db.query("DELETE FROM sessions WHERE device_id=?", json::array({active[index]["id"]}));
+        }
+        if (!existing.is_null() && existing["status"] == "pending")
+            db.query("UPDATE trusted_devices SET status='revoked' WHERE id=?", json::array({existing["id"]}));
+        db.query("INSERT INTO trusted_devices(user_id,name,token_hash,status,created_at,expires_at,last_used_at,reviewed_at) VALUES(?,?,?,'approved',?,?,?,?)",
+                 json::array({user["id"], name, sha256(token), now(), now() + DEVICE_TTL, now(), now()}));
+        id = db.id();
+    }
+    auth_cookie(req, res, "mf_device", token, DEVICE_TTL);
+    return id;
+}
+
 // Caller holds BEGIN IMMEDIATE and has verified this receipt's ownership, approval and expiry.
 static json claim_registration(Db& db, const json& row, const json& user,
                                const httplib::Request& req, httplib::Response& res) {
     json device_id = nullptr;
     if (row.value("trust_device", 0)) {
-        require_device_transport(req);
-        auto token = random_hex(32);
-        db.query("INSERT INTO trusted_devices(user_id,name,token_hash,status,created_at,expires_at,last_used_at,reviewed_at,reviewer_id) VALUES(?,?,?,'approved',?,?,?,?,?)",
-                 json::array({user["id"], row["device_name"], sha256(token), now(), now() + DEVICE_TTL, now(), row["reviewed_at"], row["reviewer_id"]}));
-        device_id = db.id();
-        auth_cookie(req, res, "mf_device", token, DEVICE_TTL);
+        device_id = remember_browser(db, user, req, res, as_string(row, "device_name"));
     }
     db.query("UPDATE registration_requests SET claimed_at=? WHERE id=?", json::array({now(), row["id"]}));
     return device_id;
 }
 
-static json password_login(Db& db, const json& user, const httplib::Request& req, httplib::Response& res) {
+static json password_login(Db& db, const json& user, const httplib::Request& req, httplib::Response& res, bool remember) {
     json device_id = nullptr;
     std::string state = "missing";
     bool claimed = false;
@@ -134,32 +159,30 @@ static json password_login(Db& db, const json& user, const httplib::Request& req
         const auto receipt = request_cookie(req, "mf_registration");
         const auto registration = db.one("SELECT * FROM registration_requests WHERE receipt_hash=?",
                                          json::array({sha256(receipt)}));
+        std::string name = "我的浏览器";
         if (!receipt.empty() && !registration.is_null() && registration["user_id"] == user["id"] &&
             registration["status"] == "approved" && registration["claimed_at"].is_null() &&
             as_int(registration, "expires_at") > now() && !user.value("reset_until", 0)) {
-            if (!registration.value("trust_device", 0) || device_login_available(req)) {
-                device_id = claim_registration(db, registration, user, req, res);
-                claimed = true;
-            } else state = "https_required"; // Password login stays available; keep the approved receipt unclaimed.
+            name = as_string(registration, "device_name");
+            db.query("UPDATE registration_requests SET claimed_at=? WHERE id=?", json::array({now(), registration["id"]}));
+            claimed = true;
         }
-        if (device_id.is_null() && !user.value("reset_until", 0)) {
-            const auto token = request_cookie(req, "mf_device");
-            const auto device = db.one("SELECT * FROM trusted_devices WHERE user_id=? AND token_hash=?",
-                                       json::array({user["id"], sha256(token)}));
-            if (!token.empty() && !device.is_null()) {
-                state = as_string(device_public(device), "status");
-                if (state == "approved") {
-                    if (device_login_available(req)) {
-                        device_id = device["id"];
-                        db.query("UPDATE trusted_devices SET last_used_at=? WHERE id=?", json::array({now(), device_id}));
-                    } else state = "https_required";
-                }
+        if (remember && !user.value("reset_until", 0)) {
+            if (device_login_available(req)) device_id = remember_browser(db, user, req, res, name);
+            else state = "https_required";
+        } else if (!remember) {
+            const auto device = db.one("SELECT id FROM trusted_devices WHERE user_id=? AND token_hash=?",
+                                       json::array({user["id"], sha256(request_cookie(req, "mf_device"))}));
+            if (!device.is_null()) {
+                db.query("UPDATE trusted_devices SET status='revoked' WHERE id=?", json::array({device["id"]}));
+                db.query("DELETE FROM sessions WHERE device_id=?", json::array({device["id"]}));
             }
         }
         issue_session(db, user, req, res, device_id);
         db.raw("COMMIT");
     } catch (...) { db.raw("ROLLBACK"); throw; }
     if (claimed) auth_cookie(req, res, "mf_registration", "", 0);
+    if (!remember) auth_cookie(req, res, "mf_device", "", 0);
     auto result = public_user(user);
     result["browser_login"] = device_id.is_null() ? state : "approved";
     return result;
@@ -189,7 +212,7 @@ static bool public_auth(Db& db, const httplib::Request& req, httplib::Response& 
     }
     if (req.path == "/api/auth/options" && req.method == "GET") {
         response_json(res, 200, {{"registration", true}, {"trusted_login", device_login_available(req)},
-                                 {"secure_transport", secure_request(req)}, {"device_days", 90}});
+                                 {"secure_transport", secure_request(req)}, {"device_days", 90}, {"remember_on_password_login", true}});
         return true;
     }
     if (req.path == "/api/register" && req.method == "POST") {
@@ -293,17 +316,14 @@ static bool authenticated_auth(Db& db, const json& user, const httplib::Request&
         if (user.value("reset_until", 0)) fail(403, "请先完成密码重置");
         auth_rate_limit(req, "device-request", 10, 3600);
         auto name = auth_device_name(json_body(req));
-        auto existing = db.one("SELECT * FROM trusted_devices WHERE token_hash=? AND user_id=?", json::array({sha256(request_cookie(req, "mf_device")), user["id"]}));
-        if (!existing.is_null() && (device_public(existing)["status"] == "pending" || device_public(existing)["status"] == "approved")) {
-            response_json(res, 200, device_public(existing)); return true;
-        }
-        auto count = db.one("SELECT COUNT(*) AS n FROM trusted_devices WHERE user_id=? AND status IN ('pending','approved') AND expires_at>?", json::array({user["id"], now()}));
-        if (as_int(count, "n") >= 20) fail(409, "已有 20 台待审核或可信设备，请先撤销旧设备");
-        auto token = random_hex(32);
-        db.query("INSERT INTO trusted_devices(user_id,name,token_hash,status,created_at,expires_at,last_used_at) VALUES(?,?,?,'pending',?,?,?)",
-                 json::array({user["id"], name, sha256(token), now(), now() + REGISTRATION_TTL, now()}));
-        auto device = db.one("SELECT * FROM trusted_devices WHERE id=?", json::array({db.id()}));
-        auth_cookie(req, res, "mf_device", token, DEVICE_TTL);
+        json device;
+        db.raw("BEGIN IMMEDIATE");
+        try {
+            auto id = remember_browser(db, user, req, res, name);
+            issue_session(db, user, req, res, id);
+            device = db.one("SELECT * FROM trusted_devices WHERE id=?", json::array({id}));
+            db.raw("COMMIT");
+        } catch (...) { db.raw("ROLLBACK"); throw; }
         response_json(res, 201, device_public(device));
         return true;
     }

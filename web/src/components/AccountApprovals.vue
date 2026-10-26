@@ -10,13 +10,12 @@ async function refresh() {
   try { const [r, d] = await Promise.all([api.registrations(), api.deviceRequests()]); registrations.value = r.requests; devices.value = d.devices }
   catch (e) { error.value = e instanceof Error ? e.message : '审核列表读取失败' }
 }
-async function review(kind: 'registration' | 'device', id: number, decision: 'approve' | 'reject') {
+async function review(id: number, decision: 'approve' | 'reject') {
   if (busy.value) return
   busy.value = true; error.value = ''; notice.value = ''
   try {
-    if (kind === 'registration') await api.reviewRegistration(id, decision)
-    else await api.reviewTrustedDevice(id, decision)
-    notice.value = decision === 'approve' ? '已通过审核；新账号仍需在上方分配文件权限' : '已驳回申请'
+    await api.reviewRegistration(id, decision)
+    notice.value = decision === 'approve' ? '账号已通过审核，密码登录默认记住浏览器；新账号仍需分配文件权限' : '已驳回申请'
     await refresh()
     emit('changed')
   } catch (e) { error.value = e instanceof Error ? e.message : '审核失败' }
@@ -37,16 +36,16 @@ defineExpose({ refresh })
   <div class="lan-review-card lan-account-approvals">
     <p v-if="error" class="lan-message is-error" role="alert">{{ error }}<button aria-label="关闭审核错误" @click="error = ''">×</button></p>
     <p v-if="notice" class="lan-message is-ok" role="status">{{ notice }}<button aria-label="关闭审核提示" @click="notice = ''">×</button></p>
-    <section class="card"><div class="card-head"><div><h2 class="h3">注册申请审核</h2><p class="sub">仅创建普通账号，默认无文件权限；勾选了免密的申请，通过时会一并批准该浏览器。</p></div><div class="spacer" /><button class="btn btn-sm" :disabled="busy" @click="refresh">刷新审核列表</button></div>
+    <section class="card"><div class="card-head"><div><h2 class="h3">注册申请审核</h2><p class="sub">仅创建普通账号，默认无文件权限；账号通过后密码登录自动记住浏览器，无需另审设备。</p></div><div class="spacer" /><button class="btn btn-sm" :disabled="busy" @click="refresh">刷新审核列表</button></div>
       <div class="lan-table-wrap"><table class="files"><thead><tr><th>申请账号</th><th>设备</th><th>申请时间</th><th>状态</th><th>操作</th></tr></thead><tbody>
-        <tr v-for="item in registrations" :key="item.id"><td data-label="账号">{{ item.username }}</td><td data-label="设备">{{ item.device_name }} <span v-if="item.trust_device" class="chip chip-ok">含浏览器免密申请</span></td><td data-label="提交时间">{{ authTime(item.created_at) }}</td><td data-label="状态">{{ authStatus[item.status] }}</td><td data-label="操作"><template v-if="item.status === 'pending'"><button class="btn btn-sm btn-primary" :disabled="busy" @click="review('registration', item.id, 'approve')">{{ item.trust_device ? '通过并批准免密' : '通过注册' }}</button> <button class="btn btn-sm btn-danger" :disabled="busy" @click="review('registration', item.id, 'reject')">驳回注册</button></template></td></tr>
+        <tr v-for="item in registrations" :key="item.id"><td data-label="账号">{{ item.username }}</td><td data-label="设备">{{ item.device_name }} <span v-if="item.trust_device" class="chip chip-ok">自动记住浏览器</span></td><td data-label="提交时间">{{ authTime(item.created_at) }}</td><td data-label="状态">{{ authStatus[item.status] }}</td><td data-label="操作"><template v-if="item.status === 'pending'"><button class="btn btn-sm btn-primary" :disabled="busy" @click="review(item.id, 'approve')">通过注册</button> <button class="btn btn-sm btn-danger" :disabled="busy" @click="review(item.id, 'reject')">驳回注册</button></template></td></tr>
         <tr v-if="!registrations.length"><td colspan="5" class="lan-table-empty">暂无注册申请</td></tr>
       </tbody></table></div>
     </section>
-    <section class="card lan-review-card"><div class="card-head"><div><h2 class="h3">浏览器免密审核</h2><p class="sub">普通用户由管理员审核；管理员和超级管理员的设备仅由超级管理员审核。</p></div></div>
+    <section class="card lan-review-card"><div class="card-head"><div><h2 class="h3">浏览器登录管理</h2><p class="sub">密码登录后自动记住，无需单独审批。可在此撤销登录凭据；管理员浏览器仅由超级管理员管理。</p></div></div>
       <div class="lan-table-wrap"><table class="files"><thead><tr><th>账号</th><th>设备</th><th>状态</th><th>最近使用</th><th>操作</th></tr></thead><tbody>
-        <tr v-for="item in devices" :key="item.id"><td data-label="账号">{{ item.username }}</td><td data-label="设备">{{ item.name }}</td><td data-label="状态">{{ authStatus[item.status] }}</td><td data-label="最近使用">{{ authTime(item.last_used_at) }}</td><td data-label="操作"><template v-if="item.status === 'pending'"><button class="btn btn-sm btn-primary" :disabled="busy" @click="review('device', item.id, 'approve')">批准免密</button> <button class="btn btn-sm btn-danger" :disabled="busy" @click="review('device', item.id, 'reject')">驳回免密</button></template><button v-else-if="item.status === 'approved'" class="btn btn-sm btn-danger" :disabled="busy" @click="revoking = item">撤销免密</button></td></tr>
-        <tr v-if="!devices.length"><td colspan="5" class="lan-table-empty">暂无浏览器免密申请</td></tr>
+        <tr v-for="item in devices" :key="item.id"><td data-label="账号">{{ item.username }}</td><td data-label="设备">{{ item.name }}</td><td data-label="状态">{{ item.status === 'pending' ? '旧版待审，现无需审批' : authStatus[item.status] }}</td><td data-label="最近使用">{{ authTime(item.last_used_at) }}</td><td data-label="操作"><button v-if="['pending', 'approved'].includes(item.status)" class="btn btn-sm btn-danger" :disabled="busy" @click="revoking = item">撤销免密</button></td></tr>
+        <tr v-if="!devices.length"><td colspan="5" class="lan-table-empty">暂无浏览器登录记录</td></tr>
       </tbody></table></div>
     </section>
   </div>

@@ -42,9 +42,13 @@ def main():
             context.close()  # Persistent-context close terminates its Chromium process.
             active.remove(context)
 
-        def submit_login(page):
+        def submit_login(page, remember=True):
             page.locator('#acct').fill(name)
             page.locator('#pwd').fill(password)
+            checkbox = page.get_by_role('checkbox', name='记住此浏览器（90 天）', exact=True)
+            expect(checkbox).to_be_checked()
+            if not remember:
+                checkbox.uncheck()
             page.get_by_role('button', name='登录', exact=True).click()
             expect(page.locator('.me-name')).to_have_text(name)
 
@@ -83,31 +87,14 @@ def main():
                 if cycle == 1:
                     close(owner)
 
-            # Account approval cannot silently approve a different browser holding only the password.
+            # The approved account can remember a clean browser using only its correct password.
             untrusted, other_page = launch('unapproved')
             other_page.goto(args.url)
             expect(other_page.get_by_role('heading', name='登录 MyFolder', exact=True)).to_be_visible()
             submit_login(other_page)
-            expect(other_page.locator('.lan-login-status')).to_contain_text('此浏览器尚未开启免密')
-            assert 'mf_device' not in {cookie['name'] for cookie in untrusted.cookies()}
-            other_page.screenshot(path=str(artifacts / 'temporary-login-warning.png'), full_page=True)
-            close(untrusted)
-            untrusted, other_page = launch('unapproved')
-            other_page.goto(args.url)
-            expect(other_page.get_by_role('heading', name='登录 MyFolder', exact=True)).to_be_visible()
-            # Existing accounts without the original registration receipt use normal device approval.
-            submit_login(other_page)
-            other_page.get_by_role('button', name='查看免密状态', exact=True).click()
-            other_page.locator('#trusted-device-name').fill('Second persistent browser')
-            other_page.get_by_role('button', name='申请免密登录', exact=True).click()
-            expect(other_page.locator('[aria-label="当前浏览器免密状态"]')).to_contain_text('仍待管理员批准')
-            devices = admin.request.get(args.url + '/api/admin/trusted-devices').json()['devices']
-            device_id = next(device['id'] for device in devices if device['username'] == name and device['name'] == 'Second persistent browser')
-            assert admin.request.post(args.url + '/api/admin/trusted-devices/review', data={'id': device_id, 'decision': 'approve'}).status == 200
-            other_page.get_by_role('button', name='刷新', exact=True).click()
-            expect(other_page.locator('[aria-label="当前浏览器免密状态"]')).to_contain_text('此浏览器免密已开启')
-            other_page.locator('.nav-item').filter(has_text='文件区').click()
             expect(other_page.locator('.lan-login-status')).to_contain_text('此浏览器免密已开启')
+            assert 'mf_device' in {cookie['name'] for cookie in untrusted.cookies()}
+            other_page.screenshot(path=str(artifacts / 'clean-browser-default-remember.png'), full_page=True)
             close(untrusted)
             untrusted, other_page = launch('unapproved')
             with other_page.expect_response(lambda r: r.url.endswith('/api/auth/device-login') and r.status == 200):
@@ -116,6 +103,19 @@ def main():
             other_page.get_by_role('button', name='退出登录', exact=True).click()
             expect(other_page.get_by_role('heading', name='登录 MyFolder', exact=True)).to_be_visible()
             close(untrusted)
+
+            # Explicit opt-out is the only normal password-login path that does not keep a persistent proof.
+            public, public_page = launch('public-computer')
+            public_page.goto(args.url)
+            expect(public_page.get_by_role('heading', name='登录 MyFolder', exact=True)).to_be_visible()
+            submit_login(public_page, remember=False)
+            expect(public_page.locator('.lan-login-status')).to_contain_text('本次未记住浏览器')
+            assert 'mf_device' not in {cookie['name'] for cookie in public.cookies()}
+            close(public)
+            public, public_page = launch('public-computer')
+            public_page.goto(args.url)
+            expect(public_page.get_by_role('heading', name='登录 MyFolder', exact=True)).to_be_visible()
+            close(public)
 
             page.get_by_role('button', name='退出登录', exact=True).click()
             expect(page.get_by_role('heading', name='登录 MyFolder', exact=True)).to_be_visible()
@@ -131,8 +131,8 @@ def main():
                 context.close()
             admin_browser.close()
     print(json.dumps({'manual_login_claim': 'passed', 'real_browser_restart_cycles': 2,
-                      'automatic_login_and_rotation': True, 'unapproved_browser_stays_temporary': True,
-                      'existing_account_device_approval_restart': True,
+                      'automatic_login_and_rotation': True, 'clean_browser_password_login_remembers': True,
+                      'no_registration_receipt_or_device_approval': True, 'explicit_opt_out_stays_temporary': True,
                       'explicit_logout_stays_logged_out': True}))
 
 

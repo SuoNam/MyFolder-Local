@@ -1,7 +1,7 @@
 export type Permission = 'upload' | 'download' | 'modify' | 'delete'
 export type BrowserLoginState = 'approved' | 'pending' | 'rejected' | 'revoked' | 'expired' | 'missing' | 'https_required'
 export type User = { id: number; username: string; role: 'superadmin' | 'admin' | 'user'; reset_until: number; browser_login?: BrowserLoginState }
-export type AuthOptions = { registration: boolean; trusted_login: boolean; secure_transport: boolean; device_days: number }
+export type AuthOptions = { registration: boolean; trusted_login: boolean; secure_transport: boolean; device_days: number; remember_on_password_login?: boolean }
 export type RegistrationStatus = { username: string; status: 'pending' | 'approved' | 'rejected' | 'expired'; claimed?: boolean }
 export type RegistrationRequest = RegistrationStatus & { id: number; device_name: string; trust_device: number; created_at: number; expires_at: number; reviewed_at: number | null }
 export type TrustedDevice = { id: number; user_id: number; name: string; status: 'pending' | 'approved' | 'rejected' | 'revoked' | 'expired'; created_at: number; expires_at: number; last_used_at: number; reviewed_at: number | null; username?: string; role?: User['role']; current?: boolean }
@@ -67,7 +67,7 @@ export const api = {
   deviceRequests: () => request<{ devices: TrustedDevice[] }>('admin/trusted-devices'),
   reviewTrustedDevice: (id: number, decision: 'approve' | 'reject') => request<{ ok: boolean }>('admin/trusted-devices/review', json('POST', { id, decision })),
   me: () => request<User>('me'),
-  login: (username: string, password: string) => request<User>('login', json('POST', { username, password })),
+  login: (username: string, password: string, remember_browser = true) => request<User>('login', json('POST', { username, password, remember_browser })),
   logout: () => request<{ ok: boolean }>('logout', { method: 'POST' }),
   requestPassword: (username: string) => request<{ message: string }>('password-requests', json('POST', { username })),
   passwordRequests: () => request<{ requests: PasswordRequest[] }>('password-requests'),

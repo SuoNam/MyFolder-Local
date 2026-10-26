@@ -40,8 +40,9 @@ class Browser:
         conn.close()
         return result
 
-    def login(self, username='admin', password=None):
-        return self.call('POST', '/api/login', {'username': username, 'password': password or self.node.initial_password})
+    def login(self, username='admin', password=None, remember=True):
+        return self.call('POST', '/api/login', {'username': username, 'password': password or self.node.initial_password,
+                                               'remember_browser': remember})
 
     def register(self, username='applicant', trust=False):
         return self.call('POST', '/api/register', {'username': username, 'password': 'new-password',
@@ -53,7 +54,7 @@ class ApprovalAuthentication(unittest.TestCase):
         self.node = Node()
         self.addCleanup(self.node.close)
         self.admin = Browser(self.node)
-        self.assertEqual(self.admin.login()[0], 200)
+        self.assertEqual(self.admin.login(remember=False)[0], 200)
 
     def sql(self, query, params=()):
         with sqlite3.connect(self.node.data / 'myfolder.sqlite3') as db:
@@ -68,21 +69,16 @@ class ApprovalAuthentication(unittest.TestCase):
         self.assertEqual(self.admin.call('POST', '/api/admin/registrations/review', {'id': item['id'], 'decision': decision})[0], 200)
         return item['id']
 
-    def approve_device(self, device_id):
-        self.assertEqual(self.admin.call('POST', '/api/admin/trusted-devices/review', {'id': device_id, 'decision': 'approve'})[0], 200)
-
     def existing_user(self, name='member', role='user'):
         self.assertEqual(self.admin.call('POST', '/api/users', {'username': name, 'password': 'secret123', 'role': role})[0], 201)
         browser = Browser(self.node)
-        self.assertEqual(browser.login(name, 'secret123')[0], 200)
+        self.assertEqual(browser.login(name, 'secret123', remember=False)[0], 200)
         return browser
 
     def trusted_browser(self, name='member'):
         browser = self.existing_user(name)
         status, device = browser.call('POST', '/api/trusted-devices/request', {'device_name': name + ' browser'})
         self.assertEqual(status, 201)
-        self.assertEqual(browser.call('POST', '/api/auth/device-login', {})[0], 401)
-        self.approve_device(device['id'])
         self.assertEqual(browser.call('POST', '/api/auth/device-login', {})[0], 200)
         return browser, device['id']
 
@@ -148,8 +144,8 @@ class ApprovalAuthentication(unittest.TestCase):
         self.assertEqual(person.call('GET', '/api/admin/trusted-devices')[0], 403)
         self.assertEqual(person.call('POST', '/api/trusted-devices/revoke', {'id': device_id})[0], 403)
         self.assertEqual(manager.call('POST', '/api/trusted-devices/revoke', {'id': device_id})[0], 200)
-        device_id = manager.call('POST', '/api/trusted-devices/request', {'device_name': 'New manager browser'})[1]['id']
-        self.approve_device(device_id)
+        self.assertEqual(manager.call('GET', '/api/me')[0], 401)
+        self.assertEqual(manager.login('manager', 'secret123')[1]['browser_login'], 'approved')
         self.assertEqual(manager.call('POST', '/api/auth/device-login', {})[0], 200)
 
     def test_password_login_claims_approved_registration_once(self):
@@ -166,26 +162,28 @@ class ApprovalAuthentication(unittest.TestCase):
         self.assertTrue(any('mf_device=' in c and 'Max-Age=7776000' in c for c in person.set_cookies))
         self.assertEqual(self.sql('SELECT COUNT(*) FROM trusted_devices')[0][0], 1)
         self.assertIsNotNone(self.sql("SELECT claimed_at FROM registration_requests WHERE username='manual_claim'")[0][0])
-        # A consumed registration receipt cannot authorize a second browser, even with the account password.
+        # A consumed receipt cannot activate again; a fresh correct password can remember another browser.
         replay = Browser(self.node, cookies=receipt)
-        self.assertEqual(replay.login('manual_claim', 'new-password')[1]['browser_login'], 'missing')
-        self.assertNotIn('mf_device', replay.cookies)
-        self.assertEqual(self.sql('SELECT COUNT(*) FROM trusted_devices')[0][0], 1)
+        self.assertEqual(replay.call('POST', '/api/registration/activate', {})[0], 409)
+        self.assertEqual(replay.login('manual_claim', 'new-password')[1]['browser_login'], 'approved')
+        self.assertIn('mf_device', replay.cookies)
+        self.assertEqual(self.sql('SELECT COUNT(*) FROM trusted_devices')[0][0], 2)
         person.cookies.pop('session')
         self.assertEqual(person.call('POST', '/api/auth/device-login', {})[0], 200)
 
-    def test_password_login_requires_matching_browser_receipt(self):
+    def test_password_login_remembers_without_browser_receipt(self):
         owner = Browser(self.node)
         self.assertEqual(owner.register('receipt_owner', trust=True)[0], 201)
         self.review_registration('receipt_owner')
         other_browser = Browser(self.node)
-        self.assertEqual(other_browser.login('receipt_owner', 'new-password')[1]['browser_login'], 'missing')
-        self.assertNotIn('mf_device', other_browser.cookies)
-        self.assertEqual(owner.login()[1]['browser_login'], 'missing')  # Receipt is not for the admin account.
+        status, user = other_browser.call('POST', '/api/login', {'username': 'receipt_owner', 'password': 'new-password'})
+        self.assertEqual((status, user['browser_login']), (200, 'approved'))
+        self.assertIn('mf_device', other_browser.cookies)
+        self.assertEqual(owner.login(remember=False)[1]['browser_login'], 'missing')
         self.assertIn('mf_registration', owner.cookies)
         self.assertIsNone(self.sql("SELECT claimed_at FROM registration_requests WHERE username='receipt_owner'")[0][0])
         self.assertEqual(owner.login('receipt_owner', 'new-password')[1]['browser_login'], 'approved')
-        self.assertEqual(self.sql('SELECT COUNT(*) FROM trusted_devices')[0][0], 1)
+        self.assertEqual(self.sql('SELECT COUNT(*) FROM trusted_devices')[0][0], 2)
 
     def test_password_login_does_not_claim_expired_registration(self):
         person = Browser(self.node)
@@ -193,32 +191,34 @@ class ApprovalAuthentication(unittest.TestCase):
         self.review_registration('expired_claim')
         self.sql("UPDATE registration_requests SET expires_at=0 WHERE username='expired_claim'")
         status, user = person.login('expired_claim', 'new-password')
-        self.assertEqual((status, user['browser_login']), (200, 'missing'))
-        self.assertNotIn('mf_device', person.cookies)
-        self.assertEqual(self.sql('SELECT COUNT(*) FROM trusted_devices')[0][0], 0)
+        self.assertEqual((status, user['browser_login']), (200, 'approved'))
+        self.assertIn('mf_device', person.cookies)
+        self.assertEqual(self.sql('SELECT COUNT(*) FROM trusted_devices')[0][0], 1)
 
-    def test_password_login_without_trust_remains_temporary(self):
+    def test_explicit_password_login_opt_out_remains_temporary(self):
         person = Browser(self.node)
         self.assertEqual(person.register('no_trust_claim', trust=False)[0], 201)
         self.review_registration('no_trust_claim')
-        status, user = person.login('no_trust_claim', 'new-password')
+        status, user = person.login('no_trust_claim', 'new-password', remember=False)
         self.assertEqual((status, user['browser_login']), (200, 'missing'))
         self.assertNotIn('mf_device', person.cookies)
         self.assertNotIn('mf_registration', person.cookies)
         self.assertEqual(self.sql('SELECT COUNT(*) FROM trusted_devices')[0][0], 0)
 
-    def test_password_login_never_reapproves_pending_or_revoked_device(self):
+    def test_revoked_proof_stays_invalid_but_password_can_remember_again(self):
         person = self.existing_user()
         device_id = person.call('POST', '/api/trusted-devices/request', {'device_name': 'Pending browser'})[1]['id']
-        self.assertEqual(person.login('member', 'secret123')[1]['browser_login'], 'pending')
-        self.approve_device(device_id)
+        self.assertEqual(person.call('POST', '/api/auth/device-login', {})[0], 200)
         self.assertEqual(person.login('member', 'secret123')[1]['browser_login'], 'approved')
         device_session = self.sql('SELECT device_id FROM sessions WHERE token_hash=?', (hashlib.sha256(person.cookies['session'].encode()).hexdigest(),))
         self.assertEqual(device_session[0][0], device_id)
         self.assertEqual(self.admin.call('POST', '/api/trusted-devices/revoke', {'id': device_id})[0], 200)
-        self.assertEqual(person.login('member', 'secret123')[1]['browser_login'], 'revoked')
+        old_token = person.cookies['mf_device']
         self.assertEqual(person.call('POST', '/api/auth/device-login', {})[0], 401)
-        self.assertEqual(self.sql('SELECT COUNT(*) FROM trusted_devices')[0][0], 1)
+        self.assertEqual(person.login('member', 'secret123')[1]['browser_login'], 'approved')
+        self.assertNotEqual(old_token, person.cookies['mf_device'])
+        self.assertEqual(Browser(self.node, cookies={'mf_device': old_token}).call('POST', '/api/auth/device-login', {})[0], 401)
+        self.assertEqual(self.sql('SELECT COUNT(*) FROM trusted_devices')[0][0], 2)
 
     def test_password_claim_keeps_http_login_when_https_is_required(self):
         other = Node(extra_env={'MYFOLDER_REQUIRE_HTTPS_DEVICE_LOGIN': '1'})
@@ -233,7 +233,7 @@ class ApprovalAuthentication(unittest.TestCase):
             status, user = plain.login('secure_claim', 'new-password')
             self.assertEqual((status, user['browser_login']), (200, 'https_required'))
             self.assertNotIn('mf_device', plain.cookies)
-            self.assertIn('mf_registration', plain.cookies)
+            self.assertNotIn('mf_registration', plain.cookies)
             self.assertEqual(secure.login('secure_claim', 'new-password')[1]['browser_login'], 'approved')
             self.assertIn('mf_device', secure.cookies)
         finally:
@@ -266,7 +266,6 @@ class ApprovalAuthentication(unittest.TestCase):
         second = Browser(self.node)
         self.assertEqual(second.login('member', 'secret123')[0], 200)
         device_id = second.call('POST', '/api/trusted-devices/request', {'device_name': 'Second browser'})[1]['id']
-        self.approve_device(device_id)
         self.assertEqual(second.call('POST', '/api/auth/device-login', {})[0], 200)
         stolen = Browser(self.node, cookies=dict(first.cookies))
         self.assertEqual(first.call('POST', '/api/logout', {})[0], 200)
@@ -281,8 +280,31 @@ class ApprovalAuthentication(unittest.TestCase):
         self.sql('UPDATE trusted_devices SET expires_at=? WHERE id=?', (int(time.time()) - 1, device_id))
         self.assertEqual(browser.call('GET', '/api/me')[0], 401)
         self.assertEqual(browser.call('POST', '/api/auth/device-login', {})[0], 401)
-        self.sql('UPDATE trusted_devices SET expires_at=?,last_used_at=? WHERE id=?', (int(time.time()) + 86400, int(time.time()) - 31 * 86400, device_id))
+        self.sql('UPDATE trusted_devices SET expires_at=?,last_used_at=? WHERE id=?', (int(time.time()) + 86400, int(time.time()) - 91 * 86400, device_id))
         self.assertEqual(browser.call('POST', '/api/auth/device-login', {})[0], 401)
+
+    def test_remembered_browser_is_valid_after_sixty_idle_days(self):
+        browser, device_id = self.trusted_browser()
+        self.sql('UPDATE trusted_devices SET last_used_at=? WHERE id=?', (int(time.time()) - 60 * 86400, device_id))
+        self.assertEqual(browser.call('POST', '/api/auth/device-login', {})[0], 200)
+
+    def test_opting_out_forgets_and_revokes_current_browser(self):
+        browser, device_id = self.trusted_browser()
+        old_token = browser.cookies['mf_device']
+        self.assertEqual(browser.login('member', 'secret123', remember=False)[1]['browser_login'], 'missing')
+        self.assertNotIn('mf_device', browser.cookies)
+        self.assertEqual(self.sql('SELECT status FROM trusted_devices WHERE id=?', (device_id,))[0][0], 'revoked')
+        self.assertEqual(Browser(self.node, cookies={'mf_device': old_token}).call('POST', '/api/auth/device-login', {})[0], 401)
+
+    def test_default_remembering_keeps_only_twenty_active_browsers(self):
+        person, device_id = self.trusted_browser()
+        uid = self.sql('SELECT user_id FROM trusted_devices WHERE id=?', (device_id,))[0][0]
+        for index in range(19):
+            self.sql("INSERT INTO trusted_devices(user_id,name,token_hash,status,created_at,expires_at,last_used_at) VALUES(?,?,?,'approved',?,?,?)",
+                     (uid, 'Older browser', 'test-hash-' + str(index), int(time.time()) - 100, int(time.time()) + 86400, index))
+        newcomer = Browser(self.node)
+        self.assertEqual(newcomer.login('member', 'secret123')[1]['browser_login'], 'approved')
+        self.assertEqual(self.sql("SELECT COUNT(*) FROM trusted_devices WHERE user_id=? AND status='approved'", (uid,))[0][0], 20)
 
     def test_http_is_available_by_default_without_override(self):
         plain = Browser(self.node)
