@@ -275,13 +275,13 @@ class ApprovalAuthentication(unittest.TestCase):
         self.assertEqual(stolen.call('POST', '/api/auth/device-login', {})[0], 401)
         self.assertEqual(second.call('GET', '/api/me')[0], 200)
 
-    def test_device_absolute_and_idle_expiry(self):
+    def test_device_absolute_expiry(self):
         browser, device_id = self.trusted_browser()
         self.sql('UPDATE trusted_devices SET expires_at=? WHERE id=?', (int(time.time()) - 1, device_id))
         self.assertEqual(browser.call('GET', '/api/me')[0], 401)
         self.assertEqual(browser.call('POST', '/api/auth/device-login', {})[0], 401)
         self.sql('UPDATE trusted_devices SET expires_at=?,last_used_at=? WHERE id=?', (int(time.time()) + 86400, int(time.time()) - 91 * 86400, device_id))
-        self.assertEqual(browser.call('POST', '/api/auth/device-login', {})[0], 401)
+        self.assertEqual(browser.call('POST', '/api/auth/device-login', {})[0], 200)
 
     def test_remembered_browser_is_valid_after_sixty_idle_days(self):
         browser, device_id = self.trusted_browser()
@@ -295,6 +295,105 @@ class ApprovalAuthentication(unittest.TestCase):
         self.assertNotIn('mf_device', browser.cookies)
         self.assertEqual(self.sql('SELECT status FROM trusted_devices WHERE id=?', (device_id,))[0][0], 'revoked')
         self.assertEqual(Browser(self.node, cookies={'mf_device': old_token}).call('POST', '/api/auth/device-login', {})[0], 401)
+
+    def test_login_policy_authorization_and_input_validation(self):
+        manager = self.existing_user('policy_admin', 'admin')
+        person = self.existing_user('policy_member')
+        endpoint = '/api/admin/login-policy'
+        self.assertEqual(Browser(self.node).call('GET', endpoint)[0], 401)
+        self.assertEqual(person.call('GET', endpoint)[0], 403)
+        self.assertEqual(person.call('POST', endpoint, {'device_days': 0})[0], 403)
+        self.assertEqual(manager.call('GET', endpoint), (200, {'device_days': 90}))
+        self.assertEqual(manager.call('POST', endpoint, {'device_days': 0})[0], 403)
+        for value in (-1, 3651, 1.5, '30', True, None, [], {}, 2**64 - 1):
+            with self.subTest(value=value):
+                self.assertEqual(self.admin.call('POST', endpoint, {'device_days': value})[0], 400)
+        self.assertEqual(self.admin.call('POST', endpoint, {})[0], 400)
+        self.assertEqual(self.admin.call('GET', endpoint)[1]['device_days'], 90)
+        self.assertEqual(self.sql("SELECT value FROM settings WHERE key='browser_login_days'")[0][0], '90')
+
+    def test_finite_policy_updates_only_valid_browsers_and_caps_cookie_lifetime(self):
+        browser, device_id = self.trusted_browser()
+        uid = self.sql('SELECT user_id FROM trusted_devices WHERE id=?', (device_id,))[0][0]
+        timestamp = int(time.time())
+        for state in ('expired', 'revoked', 'rejected', 'pending'):
+            self.sql("INSERT INTO trusted_devices(user_id,name,token_hash,status,created_at,expires_at,last_used_at) VALUES(?,?,?,?,?,?,?)",
+                     (uid, state, 'policy-' + state, 'approved' if state == 'expired' else state,
+                      timestamp, timestamp - 1 if state == 'expired' else timestamp + 86400, timestamp))
+        untouched = self.sql('SELECT id,status,expires_at FROM trusted_devices WHERE id!=?', (device_id,))
+        status, result = self.admin.call('POST', '/api/admin/login-policy', {'device_days': 7})
+        self.assertEqual((status, result['updated_browsers']), (200, 1))
+        expires = self.sql('SELECT expires_at FROM trusted_devices WHERE id=?', (device_id,))[0][0]
+        self.assertTrue(timestamp + 7 * 86400 <= expires <= int(time.time()) + 7 * 86400)
+        self.assertEqual(self.sql('SELECT id,status,expires_at FROM trusted_devices WHERE id!=?', (device_id,)), untouched)
+        self.assertEqual(browser.call('GET', '/api/me')[0], 200)
+        self.assertIn('Max-Age=', browser.set_cookies[0])
+        self.assertEqual(self.admin.call('POST', '/api/admin/login-policy', {'device_days': 7})[1]['updated_browsers'], 0)
+        self.assertEqual(self.sql('SELECT expires_at FROM trusted_devices WHERE id=?', (device_id,))[0][0], expires)
+        self.assertEqual(self.admin.call('POST', '/api/admin/login-policy', {'device_days': 3650})[0], 200)
+        fresh = Browser(self.node)
+        self.assertEqual(fresh.login('member', 'secret123')[0], 200)
+        self.assertTrue(any('mf_device=' in cookie and 'Max-Age=34560000' in cookie for cookie in fresh.set_cookies))
+        self.assertEqual(fresh.call('GET', '/api/trusted-devices')[1]['device_days'], 3650)
+        self.assertEqual(Browser(self.node).call('GET', '/api/auth/options')[1]['device_days'], 3650)
+
+    def test_unlimited_policy_renews_cookie_but_never_revives_revoked_proof(self):
+        browser, device_id = self.trusted_browser()
+        self.assertEqual(self.admin.call('POST', '/api/admin/login-policy', {'device_days': 0})[0], 200)
+        self.assertEqual(self.sql('SELECT expires_at FROM trusted_devices WHERE id=?', (device_id,))[0][0], 0)
+        self.sql('UPDATE trusted_devices SET last_used_at=? WHERE id=?', (int(time.time()) - 500 * 86400, device_id))
+        self.assertEqual(browser.call('GET', '/api/me')[0], 200)
+        self.assertTrue(any('mf_device=' in cookie and 'Max-Age=34560000' in cookie for cookie in browser.set_cookies))
+        old_token = browser.cookies['mf_device']
+        browser.cookies.pop('session')
+        self.assertEqual(browser.call('POST', '/api/auth/device-login', {})[0], 200)
+        self.assertNotEqual(old_token, browser.cookies['mf_device'])
+        self.assertEqual(browser.call('GET', '/api/trusted-devices')[1]['devices'][0]['expires_at'], 0)
+        fresh = Browser(self.node)
+        self.assertEqual(fresh.login('member', 'secret123')[1]['browser_login'], 'approved')
+        token = fresh.cookies['mf_device']
+        self.assertEqual(self.admin.call('POST', '/api/trusted-devices/revoke', {'id': device_id})[0], 200)
+        self.assertEqual(self.admin.call('POST', '/api/admin/login-policy', {'device_days': 1})[0], 200)
+        self.assertEqual(browser.call('GET', '/api/me')[0], 401)
+        self.assertEqual(browser.call('POST', '/api/auth/device-login', {})[0], 401)
+        self.assertEqual(Browser(self.node, cookies={'mf_device': token}).call('POST', '/api/auth/device-login', {})[0], 200)
+        # The old token was rotated above, but the active record still received the finite deadline.
+        self.assertEqual(self.sql("SELECT COUNT(*) FROM trusted_devices WHERE status='approved' AND expires_at=0")[0][0], 0)
+        self.sql("UPDATE trusted_devices SET expires_at=? WHERE status='approved'", (int(time.time()) - 1,))
+        self.assertEqual(fresh.call('GET', '/api/me')[0], 401)
+        self.assertEqual(fresh.call('POST', '/api/auth/device-login', {})[0], 401)
+
+    def test_login_policy_and_unlimited_proof_survive_server_restart(self):
+        self.assertEqual(self.admin.call('POST', '/api/admin/login-policy', {'device_days': 0})[0], 200)
+        browser, _ = self.trusted_browser()
+        self.node.process.terminate(); self.node.process.wait(timeout=5); self.node.process.stderr.close()
+        env = dict(os.environ, MYFOLDER_DATA=str(self.node.data), MYFOLDER_HOST='127.0.0.1',
+                   MYFOLDER_PORT=str(self.node.port), MYFOLDER_WEB=str(BASE / 'web' / 'dist'))
+        for key in ('MYFOLDER_REQUIRE_HTTPS_DEVICE_LOGIN', 'MYFOLDER_TRUSTED_PROXY_IPS'):
+            env.pop(key, None)
+        self.node.process = subprocess.Popen([os.environ['MYFOLDER_CPP_BINARY']], cwd=BASE, env=env,
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        for _ in range(100):
+            try:
+                if self.node.request('GET', '/')[0] == 200: break
+            except OSError: pass
+            time.sleep(.05)
+        self.assertEqual(self.admin.call('GET', '/api/admin/login-policy')[1]['device_days'], 0)
+        browser.cookies.pop('session')
+        self.assertEqual(browser.call('POST', '/api/auth/device-login', {})[0], 200)
+        self.assertEqual(browser.call('GET', '/api/trusted-devices')[1]['devices'][0]['expires_at'], 0)
+
+    def test_unlimited_browsers_are_included_in_twenty_browser_limit(self):
+        self.assertEqual(self.admin.call('POST', '/api/admin/login-policy', {'device_days': 0})[0], 200)
+        browser, device_id = self.trusted_browser()
+        uid = self.sql('SELECT user_id FROM trusted_devices WHERE id=?', (device_id,))[0][0]
+        for index in range(19):
+            self.sql("INSERT INTO trusted_devices(user_id,name,token_hash,status,created_at,expires_at,last_used_at) VALUES(?,?,?,'approved',?,0,?)",
+                     (uid, 'Unlimited browser', 'unlimited-hash-' + str(index), int(time.time()) - 100, index))
+        newcomer = Browser(self.node)
+        self.assertEqual(newcomer.login('member', 'secret123')[0], 200)
+        self.assertEqual(self.sql("SELECT COUNT(*) FROM trusted_devices WHERE status='approved'")[0][0], 20)
+        self.assertEqual(self.sql("SELECT status FROM trusted_devices WHERE token_hash='unlimited-hash-0'")[0][0], 'revoked')
 
     def test_default_remembering_keeps_only_twenty_active_browsers(self):
         person, device_id = self.trusted_browser()

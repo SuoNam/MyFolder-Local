@@ -98,7 +98,7 @@ def main():
         visitor.locator('#trusted-device-name').fill('重新申请的浏览器')
         expect(visitor.locator('[aria-label="当前浏览器免密状态"]')).to_contain_text('此浏览器免密已开启')
         visitor.get_by_role('button', name='保存名称并记住', exact=True).click()
-        expect(visitor.get_by_text('此浏览器已记住 90 天，无需管理员再次审批')).to_be_visible()
+        expect(visitor.get_by_text('此浏览器已记住，90 天，无需管理员再次审批')).to_be_visible()
         admin.get_by_role('button', name='刷新审核列表').click()
         expect(panel.locator('tr').filter(has_text='重新申请的浏览器')).to_contain_text('已通过')
         navigate(visitor, '登录设备', mobile=True)

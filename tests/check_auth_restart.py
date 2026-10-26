@@ -17,8 +17,10 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--url', default='http://127.0.0.1:4180')
     parser.add_argument('--chrome', default=r'C:\Users\Lenovo\AppData\Local\ms-playwright\chromium-1208\chrome-win64\chrome.exe')
+    parser.add_argument('--device-days', type=int, default=90)
     args = parser.parse_args()
     assert urlsplit(args.url).hostname in ('127.0.0.1', 'localhost'), 'Use a disposable loopback fixture only'
+    assert 0 <= args.device_days <= 3650
     artifacts = Path(__file__).resolve().parents[1] / '.build' / 'auth-restart'
     artifacts.mkdir(parents=True, exist_ok=True)
     name = 'restart_' + uuid.uuid4().hex[:10]
@@ -27,6 +29,8 @@ def main():
         admin_browser = pw.chromium.launch(executable_path=args.chrome, headless=True)
         admin = admin_browser.new_context()
         assert admin.request.post(args.url + '/api/login', data={'username': 'admin', 'password': 'Temporary-test-password-1'}).status == 200
+        original_days = admin.request.get(args.url + '/api/admin/login-policy').json()['device_days']
+        assert admin.request.post(args.url + '/api/admin/login-policy', data={'device_days': args.device_days}).status == 200
         active = []
         errors = []
 
@@ -45,7 +49,8 @@ def main():
         def submit_login(page, remember=True):
             page.locator('#acct').fill(name)
             page.locator('#pwd').fill(password)
-            checkbox = page.get_by_role('checkbox', name='记住此浏览器（90 天）', exact=True)
+            label = '长期记住此浏览器' if args.device_days == 0 else f'记住此浏览器（{args.device_days} 天）'
+            checkbox = page.get_by_role('checkbox', name=label, exact=True)
             expect(checkbox).to_be_checked()
             if not remember:
                 checkbox.uncheck()
@@ -66,7 +71,8 @@ def main():
             submit_login(page)
             expect(page.locator('.lan-login-status')).to_contain_text('此浏览器免密已开启')
             cookies = {cookie['name']: cookie for cookie in owner.cookies()}
-            assert cookies['mf_device']['expires'] > time.time() + 89 * 86400
+            cookie_days = min(args.device_days or 400, 400)
+            assert cookies['mf_device']['expires'] > time.time() + (cookie_days - 1) * 86400
             assert cookies['mf_device']['httpOnly'] and not cookies['mf_device']['secure']
             assert 'mf_registration' not in cookies
             token = cookies['mf_device']['value']
@@ -129,8 +135,10 @@ def main():
         finally:
             for context in reversed(active):
                 context.close()
+            assert admin.request.post(args.url + '/api/admin/login-policy', data={'device_days': original_days}).status == 200
             admin_browser.close()
     print(json.dumps({'manual_login_claim': 'passed', 'real_browser_restart_cycles': 2,
+                      'configured_device_days': args.device_days,
                       'automatic_login_and_rotation': True, 'clean_browser_password_login_remembers': True,
                       'no_registration_receipt_or_device_approval': True, 'explicit_opt_out_stays_temporary': True,
                       'explicit_logout_stays_logged_out': True}))

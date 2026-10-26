@@ -2,12 +2,15 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { api, type RegistrationStatus, type User } from '../api'
 import Icon from '../components/Icon.vue'
+import { loginDuration } from '../lib/auth'
 
 const emit = defineEmits<{ signedIn: [user: User] }>()
 const mode = ref<'login' | 'register' | 'forgot'>('login')
 const username = ref(''), password = ref(''), confirmation = ref('')
 const deviceName = ref('我的浏览器'), trustDevice = ref(true), rememberBrowser = ref(true), trustAvailable = ref(false)
 const secureTransport = ref(false)
+const deviceDays = ref(90)
+const rememberLabel = computed(() => deviceDays.value === 0 ? '长期记住此浏览器' : `记住此浏览器（${deviceDays.value} 天）`)
 const busy = ref(false), error = ref(''), notice = ref('')
 const registration = ref<RegistrationStatus | null>(null)
 const title = computed(() => ({ login: '登录 MyFolder', register: '申请注册', forgot: '忘记密码' })[mode.value])
@@ -48,7 +51,7 @@ async function submit() {
 onMounted(async () => {
   mounted = true
   try {
-    const options = await api.authOptions(); trustAvailable.value = options.trusted_login; secureTransport.value = options.secure_transport
+    const options = await api.authOptions(); trustAvailable.value = options.trusted_login; secureTransport.value = options.secure_transport; deviceDays.value = options.device_days
     if (!options.trusted_login) { trustDevice.value = false; rememberBrowser.value = false }
   }
   catch { /* Password login remains available. */ }
@@ -87,14 +90,15 @@ onUnmounted(() => { mounted = false; clearInterval(timer) })
             <div class="field"><input id="confirm-password" v-model="confirmation" type="password" autocomplete="new-password" minlength="8" maxlength="1024" required /></div>
             <label class="label field-gap" for="registration-device-name">申请设备名称</label>
             <div class="field"><input id="registration-device-name" v-model="deviceName" maxlength="40" required placeholder="例如：办公室电脑的 Chrome" /></div>
-            <label class="lan-trust-choice"><input v-model="trustDevice" type="checkbox" :disabled="!trustAvailable" />审核通过后记住此浏览器（90 天）</label>
+            <label class="lan-trust-choice"><input v-model="trustDevice" type="checkbox" :disabled="!trustAvailable" />审核通过后{{ rememberLabel }}</label>
             <p class="sub">{{ trustAvailable ? '只需管理员审核账号，无需再次审批浏览器；公共电脑请取消勾选。' : '管理员已开启仅 HTTPS 长期登录；当前仍可申请注册并使用密码登录。' }}</p>
             <p v-if="trustAvailable && !secureTransport" class="sub">当前使用 HTTP，通信未加密；请仅在可信内网使用，HTTPS 可选。</p>
           </template>
           <template v-if="mode === 'login'">
-            <label class="lan-trust-choice"><input v-model="rememberBrowser" type="checkbox" :disabled="!trustAvailable" />记住此浏览器（90 天）</label>
+            <label class="lan-trust-choice"><input v-model="rememberBrowser" type="checkbox" :disabled="!trustAvailable" />{{ rememberLabel }}</label>
             <p class="sub">{{ trustAvailable ? '默认记住，关闭浏览器后再次打开可自动登录，无需单独审批；公共电脑请取消勾选。' : '当前入口未启用长期登录；普通密码登录仍可使用。' }}</p>
           </template>
+          <p v-if="mode !== 'forgot' && trustAvailable" class="sub">服务器免密策略：{{ loginDuration(deviceDays) }}。{{ deviceDays === 0 ? '仍受退出、撤销或浏览器清理 Cookie 影响。' : '有效期由超级管理员设置。' }}</p>
           <p v-if="error" class="form-message is-error" role="alert">{{ error }}</p>
           <p v-if="notice" class="form-message is-ok" role="status">{{ notice }}</p>
           <button class="btn btn-primary submit-button" :disabled="busy || (mode === 'register' && registration?.status === 'pending')">{{ busy ? '请稍候…' : mode === 'forgot' ? '提交申请' : mode === 'register' ? '提交注册申请' : '登录' }}</button>

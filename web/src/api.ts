@@ -2,6 +2,7 @@ export type Permission = 'upload' | 'download' | 'modify' | 'delete'
 export type BrowserLoginState = 'approved' | 'pending' | 'rejected' | 'revoked' | 'expired' | 'missing' | 'https_required'
 export type User = { id: number; username: string; role: 'superadmin' | 'admin' | 'user'; reset_until: number; browser_login?: BrowserLoginState }
 export type AuthOptions = { registration: boolean; trusted_login: boolean; secure_transport: boolean; device_days: number; remember_on_password_login?: boolean }
+export type LoginPolicy = { device_days: number; updated_browsers?: number }
 export type RegistrationStatus = { username: string; status: 'pending' | 'approved' | 'rejected' | 'expired'; claimed?: boolean }
 export type RegistrationRequest = RegistrationStatus & { id: number; device_name: string; trust_device: number; created_at: number; expires_at: number; reviewed_at: number | null }
 export type TrustedDevice = { id: number; user_id: number; name: string; status: 'pending' | 'approved' | 'rejected' | 'revoked' | 'expired'; created_at: number; expires_at: number; last_used_at: number; reviewed_at: number | null; username?: string; role?: User['role']; current?: boolean }
@@ -55,13 +56,15 @@ const fileEndpoint = (operation: string, remoteId?: number | null) => remoteId =
 
 export const api = {
   authOptions: () => request<AuthOptions>('auth/options'),
+  loginPolicy: () => request<LoginPolicy>('admin/login-policy'),
+  saveLoginPolicy: (device_days: number) => request<LoginPolicy>('admin/login-policy', json('POST', { device_days })),
   register: (username: string, password: string, device_name: string, trust_device: boolean) => request<RegistrationStatus>('register', json('POST', { username, password, device_name, trust_device })),
   registrationStatus: () => request<RegistrationStatus>('registration/status'),
   activateRegistration: () => request<User>('registration/activate', json('POST', {})),
   restoreDeviceLogin: () => request<User>('auth/device-login', json('POST', {})),
   registrations: () => request<{ requests: RegistrationRequest[] }>('admin/registrations'),
   reviewRegistration: (id: number, decision: 'approve' | 'reject') => request<{ ok: boolean }>('admin/registrations/review', json('POST', { id, decision })),
-  trustedDevices: () => request<{ devices: TrustedDevice[]; trusted_login: boolean; secure_transport: boolean }>('trusted-devices'),
+  trustedDevices: () => request<{ devices: TrustedDevice[]; trusted_login: boolean; secure_transport: boolean; device_days: number }>('trusted-devices'),
   requestTrustedDevice: (device_name: string) => request<TrustedDevice>('trusted-devices/request', json('POST', { device_name })),
   revokeTrustedDevice: (id: number) => request<{ ok: boolean }>('trusted-devices/revoke', json('POST', { id })),
   deviceRequests: () => request<{ devices: TrustedDevice[] }>('admin/trusted-devices'),

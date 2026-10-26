@@ -414,8 +414,8 @@ static json identity(Db& db, const httplib::Request& req) {
     auto user = db.one("SELECT u.id,u.username,u.role,u.is_superadmin,u.reset_until FROM sessions s "
                        "JOIN users u ON u.id=s.user_id WHERE s.token_hash=? AND s.expires_at>? "
                        "AND (s.device_id IS NULL OR EXISTS(SELECT 1 FROM trusted_devices d WHERE d.id=s.device_id "
-                       "AND d.status='approved' AND d.expires_at>? AND d.last_used_at>?))",
-                       json::array({sha256(token), now(), now(), now() - 90 * 86400}));
+                       "AND d.status='approved' AND (d.expires_at=0 OR d.expires_at>?)))",
+                       json::array({sha256(token), now(), now()}));
     if (user.is_null()) fail(401, "登录已失效");
     return user;
 }

@@ -28,7 +28,8 @@ def fixture(route):
             "remotes": [{"id": 7, "remote_name": "外连服务器_" + "remote-" * 12, "status": "approved"}]}
     bodies = {
         "/api/auth/options": {"registration": True, "trusted_login": True, "secure_transport": False, "device_days": 90},
-        "/api/trusted-devices": {"devices": [{"id": 1, "user_id": 1, "name": "个人工作电脑的浏览器_" + "browser-" * 10, "status": "approved", "created_at": 1700000000, "expires_at": 1900000000, "last_used_at": 1700000000, "reviewed_at": 1700000000, "current": True}], "trusted_login": True, "secure_transport": False},
+        "/api/admin/login-policy": {"device_days": 90},
+        "/api/trusted-devices": {"devices": [{"id": 1, "user_id": 1, "name": "个人工作电脑的浏览器_" + "browser-" * 10, "status": "approved", "created_at": 1700000000, "expires_at": 1900000000, "last_used_at": 1700000000, "reviewed_at": 1700000000, "current": True}], "trusted_login": True, "secure_transport": False, "device_days": 90},
         "/api/admin/registrations": {"requests": [{"id": 1, "username": "new_member", "device_name": "申请设备_" + "device-" * 12, "trust_device": 1, "status": "pending", "created_at": 1700000000, "expires_at": 1900000000, "reviewed_at": None}]},
         "/api/admin/trusted-devices": {"devices": [{"id": 1, "user_id": 2, "username": "测试成员", "name": "待审核设备_" + "device-" * 12, "status": "pending", "created_at": 1700000000, "expires_at": 1900000000, "last_used_at": 1700000000, "reviewed_at": None}]},
         "/api/me": user, "/api/login": user, "/api/server-info": info,
