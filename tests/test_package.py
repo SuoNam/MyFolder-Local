@@ -41,6 +41,7 @@ class PackageTest(unittest.TestCase):
                 self.assertTrue(archive.getmember("./opt/myfolder-lan/web/dist/").isdir())
                 self.assertIn("./opt/myfolder-lan/cpp/src/main.cpp", names)
                 self.assertIn("./opt/myfolder-lan/cpp/src/auth.h", names)
+                self.assertIn("./opt/myfolder-lan/cpp/src/spaces.h", names)
                 self.assertIn("./opt/myfolder-lan/cpp/CMakeLists.txt", names)
                 self.assertIn("./opt/myfolder-lan/cpp/third_party/httplib.h", names)
                 self.assertIn("./opt/myfolder-lan/cpp/third_party/json.hpp", names)

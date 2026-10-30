@@ -241,6 +241,7 @@ struct Config {
     size_t max_request_bytes;
 };
 static void initialize_auth(Db& db);
+static void initialize_spaces(Db& db);
 static Config config() {
     fs::path data = fs::absolute(path_from_utf8(env("MYFOLDER_DATA", "data")));
     fs::path web = fs::absolute(path_from_utf8(env("MYFOLDER_WEB", "web/dist")));
@@ -293,6 +294,7 @@ CREATE TABLE IF NOT EXISTS remote_grants (id INTEGER PRIMARY KEY,incoming_id TEX
     db.raw("INSERT OR IGNORE INTO settings VALUES('server_name','MyFolder LAN')");
     db.query("INSERT OR IGNORE INTO settings VALUES('storage_limit',?)", json::array({std::to_string(DEFAULT_QUOTA)}));
     initialize_auth(db);
+    initialize_spaces(db);
 }
 
 static std::string setting(Db& db, const std::string& key) {
@@ -317,6 +319,10 @@ static std::string clean_path(const std::string& raw) {
     std::string part;
     while (std::getline(input, part, '/')) {
         if (part.empty() || part == "." || part == ".." || part.rfind(".upload-", 0) == 0) fail(400, "无效路径");
+#ifdef _WIN32
+        if (part.find_first_of("<>:\"|?*") != std::string::npos || part.back() == '.' || part.back() == ' ')
+            fail(400, "路径包含不支持的字符");
+#endif
         for (unsigned char c : part) if (c < 32) fail(400, "无效路径");
     }
     return value;
@@ -346,6 +352,15 @@ static Rows grants_for(Db& db, const json& user) {
     return db.query("SELECT * FROM grants WHERE user_id=?", json::array({user["id"]}));
 }
 static std::set<std::string> flags(Db& db, const json& user, const std::string& path, const Rows* given = nullptr) {
+    const auto space = user.value("_space", "legacy");
+    if (space == "personal") return {PERMISSIONS.begin(), PERMISSIONS.end()};
+    if (space == "public" && as_string(user, "role") != "admin") {
+        std::set<std::string> result = {"download"};
+        const auto grant = db.one("SELECT upload,modify,delete_allowed FROM public_grants WHERE user_id=?", json::array({user["id"]}));
+        if (!grant.is_null()) for (const auto& key : {"upload", "modify", "delete"})
+            if (grant.value(std::string(key) == "delete" ? "delete_allowed" : key, 0)) result.insert(key);
+        return result;
+    }
     if (as_string(user, "role") == "admin") return {PERMISSIONS.begin(), PERMISSIONS.end()};
     Rows owned;
     if (!given) { owned = grants_for(db, user); given = &owned; }
@@ -372,7 +387,8 @@ static json permissions_json(const std::set<std::string>& permissions) {
     return result;
 }
 static void require_permission(Db& db, const json& user, const std::string& path, const std::string& permission) {
-    if (!flags(db, user, path).count(permission)) fail(403, "该路径没有" + permission + "权限");
+    static const std::map<std::string, std::string> labels = {{"upload", "上传"}, {"download", "下载"}, {"modify", "修改"}, {"delete", "删除"}};
+    if (!flags(db, user, path).count(permission)) fail(403, "该路径没有" + labels.at(permission) + "权限");
 }
 static void require_admin(const json& user) {
     if (as_string(user, "role") != "admin") fail(403, "需要管理员权限");
@@ -380,19 +396,27 @@ static void require_admin(const json& user) {
 static void require_super(const json& user) {
     if (role_of(user) != "superadmin") fail(403, "需要超级管理员权限");
 }
-static std::pair<uint64_t, uint64_t> storage_stats(const Config& cfg) {
+static std::pair<uint64_t, uint64_t> directory_stats(const fs::path& root) {
     uint64_t bytes = 0, count = 0;
-    std::error_code error;
-    for (fs::recursive_directory_iterator it(cfg.files, fs::directory_options::skip_permission_denied, error), end;
-         it != end && !error; it.increment(error)) {
+    if (!fs::exists(root)) return {0, 0};
+    if (fs::is_symlink(fs::symlink_status(root))) fail(400, "存储根目录不能是符号链接");
+    for (fs::recursive_directory_iterator it(root), end; it != end; ++it) {
         const auto& entry = *it;
-        if (entry.is_symlink(error)) { it.disable_recursion_pending(); continue; }
-        if (entry.is_regular_file(error) && entry.path().filename().u8string().rfind(".upload-", 0) != 0) {
-            bytes += entry.file_size(error);
+        if (entry.is_symlink()) { it.disable_recursion_pending(); continue; }
+        if (entry.path().filename().u8string().rfind(".upload-", 0) == 0) { it.disable_recursion_pending(); continue; }
+        if (entry.is_regular_file()) {
+            bytes += entry.file_size();
             ++count;
         }
     }
     return {bytes, count};
+}
+static std::pair<uint64_t, uint64_t> storage_stats(const Config& cfg) {
+    auto result = directory_stats(cfg.files);
+    for (const auto& path : {cfg.data / "personal", cfg.data / "public"}) {
+        const auto part = directory_stats(path); result.first += part.first; result.second += part.second;
+    }
+    return result;
 }
 
 static std::string request_cookie(const httplib::Request& req, const std::string& name) {
@@ -434,6 +458,7 @@ static void response_json(httplib::Response& res, int code, const json& body) {
     res.set_header("X-Content-Type-Options", "nosniff");
 }
 #include "auth.h"
+#include "spaces.h"
 static std::string logical_arg(const httplib::Request& req) {
     return clean_path(req.has_param("path") ? req.get_param_value("path") : "");
 }
@@ -450,7 +475,8 @@ static std::string url_encode(const std::string& input) {
 class Service {
     Config cfg_;
     std::mutex quota_mutex_;
-    std::map<std::string, uint64_t> reservations_;
+    struct Reservation { uint64_t bytes; std::string root; };
+    std::map<std::string, Reservation> reservations_;
     std::atomic<size_t> uploads_{0};
 public:
     explicit Service(Config cfg) : cfg_(std::move(cfg)) { initialize(cfg_); }
@@ -464,6 +490,7 @@ private:
     void folder_zip(Db& db, const json& user, const httplib::Request& req, httplib::Response& res);
     void upload_file(Db& db, const json& user, const httplib::Request& req, httplib::Response& res, const httplib::ContentReader& reader);
     void file_actions(Db& db, const json& user, const httplib::Request& req, httplib::Response& res);
+    void space_actions(Db& db, const json& user, const httplib::Request& req, httplib::Response& res);
     void account_actions(Db& db, const json& user, const httplib::Request& req, httplib::Response& res);
     void admin_actions(Db& db, const json& user, const httplib::Request& req, httplib::Response& res);
     void remote_actions(Db& db, const json& user, const httplib::Request& req, httplib::Response& res);
@@ -528,8 +555,9 @@ void Service::static_file(const httplib::Request& req, httplib::Response& res) {
 }
 
 void Service::list_files(Db& db, const json& user, const httplib::Request& req, httplib::Response& res) {
+    const auto cfg = space_config(cfg_, db, user);
     auto logical = logical_arg(req);
-    auto target = disk_path(cfg_, logical);
+    auto target = disk_path(cfg, logical);
     if (!fs::is_directory(target)) fail(404, "文件夹不存在");
     auto grants = grants_for(db, user);
     if (!visible(db, user, logical, &grants)) fail(403, "该路径不可见");
@@ -550,13 +578,17 @@ void Service::list_files(Db& db, const json& user, const httplib::Request& req, 
                          {"size", size}, {"modified", file_modified(entry.path())},
                          {"permissions", permissions_json(flags(db, user, child, &grants))}});
     }
-    response_json(res, 200, {{"path", logical}, {"permissions", permissions_json(flags(db, user, logical, &grants))}, {"items", items}});
+    json result = {{"path", logical}, {"permissions", permissions_json(flags(db, user, logical, &grants))}, {"items", items}};
+    if (user.value("_space", "legacy") == "personal")
+        result["storage"] = {{"used", directory_stats(cfg.files).first}, {"limit", as_int(ensure_storage(db, user["id"]), "quota")}};
+    response_json(res, 200, result);
 }
 
 void Service::download(Db& db, const json& user, const httplib::Request& req, httplib::Response& res) {
+    const auto cfg = space_config(cfg_, db, user);
     auto logical = logical_arg(req);
     require_permission(db, user, logical, "download");
-    auto target = disk_path(cfg_, logical);
+    auto target = disk_path(cfg, logical);
     if (!fs::is_regular_file(target)) fail(404, "文件不存在");
     serve_file(target, "application/octet-stream", res, target.filename().u8string());
 }
@@ -673,9 +705,10 @@ static void write_zip(const fs::path& archive_path, const std::vector<fs::path>&
 }
 
 void Service::folder_zip(Db& db, const json& user, const httplib::Request& req, httplib::Response& res) {
+    const auto cfg = space_config(cfg_, db, user);
     auto logical = logical_arg(req);
     require_permission(db, user, logical, "download");
-    auto target = disk_path(cfg_, logical);
+    auto target = disk_path(cfg, logical);
     if (!fs::is_directory(target)) fail(404, "文件夹不存在");
     auto grants = grants_for(db, user);
     std::vector<fs::path> files;
@@ -690,7 +723,7 @@ void Service::folder_zip(Db& db, const json& user, const httplib::Request& req, 
             continue;
         }
         if (entry.is_regular_file(error)) {
-            auto relative = entry.path().lexically_relative(cfg_.files).generic_u8string();
+            auto relative = entry.path().lexically_relative(cfg.files).generic_u8string();
             if (flags(db, user, relative, &grants).count("download")) files.push_back(entry.path());
         }
     }
@@ -716,9 +749,12 @@ static void replace_file(const fs::path& temporary, const fs::path& target) {
 
 void Service::upload_file(Db& db, const json& user, const httplib::Request& req,
                           httplib::Response& res, const httplib::ContentReader& reader) {
+    const auto cfg = space_config(cfg_, db, user);
     auto logical = logical_arg(req);
     if (logical.empty()) fail(400, "必须指定文件名");
-    auto target = disk_path(cfg_, logical);
+    auto target = disk_path(cfg, logical);
+    const auto key = target.generic_u8string(), root = cfg.files.generic_u8string();
+    const auto owner_key = user.value("_space", "legacy") == "legacy" ? "" : as_string(ensure_storage(db, user["id"]), "storage_key");
     if (fs::is_directory(target)) fail(409, "目标是文件夹");
     require_permission(db, user, fs::exists(target) ? logical : parent_of(logical),
                        fs::exists(target) ? "modify" : "upload");
@@ -734,16 +770,22 @@ void Service::upload_file(Db& db, const json& user, const httplib::Request& req,
     struct Slot { std::atomic<size_t>& counter; ~Slot() { counter.fetch_sub(1); } } slot{uploads_};
     {
         std::lock_guard<std::mutex> lock(quota_mutex_);
-        if (reservations_.count(logical)) fail(409, "该文件正在上传中");
+        if (reservations_.count(key)) fail(409, "该文件正在上传中");
         auto used = storage_stats(cfg_).first;
         uint64_t old = fs::is_regular_file(target) ? fs::file_size(target) : 0;
         uint64_t pending = 0;
-        for (const auto& item : reservations_) pending += item.second;
+        uint64_t personal_pending = 0;
+        for (const auto& item : reservations_) {
+            pending += item.second.bytes;
+            if (item.second.root == root) personal_pending += item.second.bytes;
+        }
         uint64_t delta = size > old ? size - old : 0;
         uint64_t limit = std::stoull(setting(db, "storage_limit"));
-        if (used > limit || delta > limit - used || pending > limit - used - delta)
-            fail(413, "存储空间已达到当前服务器的大小上限");
-        reservations_[logical] = delta;
+        check_capacity(used, old, size, pending, limit, "存储空间已达到当前服务器的大小上限");
+        if (user.value("_space", "legacy") == "personal")
+            check_capacity(directory_stats(cfg.files).first, old, size, personal_pending,
+                           as_int(ensure_storage(db, user["id"]), "quota"), "个人空间容量不足，请清理文件或联系管理员调整配额");
+        reservations_[key] = {delta, root};
     }
     auto temporary = target.parent_path() / path_from_utf8(".upload-" + random_hex(12));
     try {
@@ -763,32 +805,109 @@ void Service::upload_file(Db& db, const json& user, const httplib::Request& req,
             auto used = storage_stats(cfg_).first;
             uint64_t old = fs::is_regular_file(target) ? fs::file_size(target) : 0;
             uint64_t others = 0;
-            for (const auto& item : reservations_) if (item.first != logical) others += item.second;
+            uint64_t personal_pending = 0;
+            for (const auto& item : reservations_) if (item.first != key) {
+                others += item.second.bytes;
+                if (item.second.root == root) personal_pending += item.second.bytes;
+            }
             uint64_t limit = std::stoull(setting(db, "storage_limit"));
-            if (used < old || used - old > limit || size > limit - (used - old) || others > limit - (used - old) - size)
-                fail(413, "存储空间已达到当前服务器的大小上限");
+            check_capacity(used, old, size, others, limit, "存储空间已达到当前服务器的大小上限");
+            if (user.value("_space", "legacy") != "legacy") {
+                if (db.one("SELECT id FROM users WHERE id=?", json::array({user["id"]})).is_null()) fail(401, "账号已失效");
+                if (as_string(ensure_storage(db, user["id"]), "storage_key") != owner_key) fail(401, "账号已变化，请重新登录");
+                require_permission(db, user, fs::exists(target) ? logical : parent_of(logical), fs::exists(target) ? "modify" : "upload");
+            }
+            if (user.value("_space", "legacy") == "personal")
+                check_capacity(directory_stats(cfg.files).first, old, size, personal_pending,
+                               as_int(ensure_storage(db, user["id"]), "quota"), "个人空间容量不足，请清理文件或联系管理员调整配额");
             replace_file(temporary, target);
-            reservations_.erase(logical);
+            reservations_.erase(key);
         }
         response_json(res, 201, {{"ok", true}, {"path", logical}, {"size", size}});
     } catch (...) {
         std::error_code error;
         fs::remove(temporary, error);
         std::lock_guard<std::mutex> lock(quota_mutex_);
-        reservations_.erase(logical);
+        reservations_.erase(key);
         throw;
     }
+}
+
+void Service::space_actions(Db& db, const json& user, const httplib::Request& req, httplib::Response& res) {
+    if (user.value("reset_until", 0)) fail(403, "请先完成密码重置");
+    if (req.path == "/api/spaces" && req.method == "GET") {
+        auto personal = user; personal["_space"] = "personal";
+        auto shared = user; shared["_space"] = "public";
+        const auto own = space_config(cfg_, db, personal), pub = space_config(cfg_, db, shared);
+        return response_json(res, 200, {
+            {"personal", {{"used", directory_stats(own.files).first}, {"limit", as_int(ensure_storage(db, user["id"]), "quota")}}},
+            {"public", {{"used", directory_stats(pub.files).first}, {"permissions", permissions_json(flags(db, shared, ""))}}},
+            {"server", {{"used", storage_stats(cfg_).first}, {"limit", std::stoull(setting(db, "storage_limit"))}}},
+            {"legacy_visible", visible(db, user, "")}});
+    }
+    if (req.path == "/api/admin/storage") {
+        require_admin(user);
+        if (req.method == "GET") {
+            json rows = json::array();
+            for (const auto& target : db.query("SELECT id,username,role,is_superadmin,reset_until FROM users ORDER BY id")) {
+                if (role_of(user) != "superadmin" && target["role"] != "user" && target["id"] != user["id"]) continue;
+                const auto storage = ensure_storage(db, target["id"]);
+                auto scoped = target; scoped["_space"] = "personal";
+                auto pub = target; pub["_space"] = "public";
+                const auto permissions = flags(db, pub, "");
+                rows.push_back({{"id", target["id"]}, {"username", target["username"]}, {"role", role_of(target)},
+                    {"storage_limit", storage["quota"]}, {"storage_used", directory_stats(space_config(cfg_, db, scoped).files).first},
+                    {"public_upload", permissions.count("upload") != 0}, {"public_modify", permissions.count("modify") != 0},
+                    {"public_delete", permissions.count("delete") != 0}});
+            }
+            return response_json(res, 200, {{"users", rows}});
+        }
+        if (req.method == "POST") {
+            const auto body = json_body(req);
+            if (!body.contains("storage_limit") || !body["storage_limit"].is_number_integer() ||
+                body["storage_limit"] < 1 || body["storage_limit"] > 1125899906842624LL)
+                fail(400, "个人配额必须为 1 字节至 1 PB 之间的整数");
+            for (const auto& key : {"public_upload", "public_modify", "public_delete"})
+                if (!body.contains(key) || !body[key].is_boolean()) fail(400, "公共区权限必须为布尔值");
+            std::lock_guard<std::mutex> lock(quota_mutex_);
+            db.raw("BEGIN IMMEDIATE");
+            try {
+                const auto id = as_int(body, "user_id");
+                const auto target = db.one("SELECT id,role,is_superadmin FROM users WHERE id=?", json::array({id}));
+                if (target.is_null()) fail(404, "用户不存在");
+                if (target["role"] != "user" && target["id"] != user["id"]) require_super(user);
+                ensure_storage(db, id);
+                db.query("UPDATE user_storage SET quota=? WHERE user_id=?", json::array({body["storage_limit"], id}));
+                if (target["role"] == "user")
+                    db.query("INSERT INTO public_grants(user_id,upload,modify,delete_allowed) VALUES(?,?,?,?) "
+                             "ON CONFLICT(user_id) DO UPDATE SET upload=excluded.upload,modify=excluded.modify,delete_allowed=excluded.delete_allowed",
+                             json::array({id, body["public_upload"], body["public_modify"], body["public_delete"]}));
+                db.raw("COMMIT");
+            } catch (...) { db.raw("ROLLBACK"); throw; }
+            return response_json(res, 200, {{"ok", true}});
+        }
+        fail(405, "请求方法不支持");
+    }
+    auto scoped = scoped_request(user, req);
+    return file_actions(db, scoped.first, scoped.second, res);
 }
 
 void Service::file_actions(Db& db, const json& user, const httplib::Request& req, httplib::Response& res) {
     if (req.path == "/api/list" && req.method == "GET") return list_files(db, user, req, res);
     if (req.path == "/api/download" && req.method == "GET") return download(db, user, req, res);
     if (req.path == "/api/folder.zip" && req.method == "GET") return folder_zip(db, user, req, res);
+    const auto cfg = space_config(cfg_, db, user);
+    std::lock_guard<std::mutex> lock(quota_mutex_);
+    auto check_busy = [&](const fs::path& path) {
+        for (const auto& item : reservations_) if (within(item.first, path.generic_u8string()) || within(path.generic_u8string(), item.first))
+            fail(409, "该路径存在正在进行的上传，请稍后重试");
+    };
     if (req.path == "/api/mkdir" && req.method == "POST") {
         auto logical = clean_path(as_string(json_body(req), "path"));
         if (logical.empty()) fail(400, "不能创建根目录");
         require_permission(db, user, parent_of(logical), "upload");
-        auto target = disk_path(cfg_, logical);
+        auto target = disk_path(cfg, logical);
+        check_busy(target);
         if (!fs::is_directory(target.parent_path())) fail(404, "父文件夹不存在");
         if (fs::exists(target)) fail(409, "目标已存在");
         fs::create_directory(target);
@@ -799,8 +918,9 @@ void Service::file_actions(Db& db, const json& user, const httplib::Request& req
         auto source = clean_path(as_string(body, "source")), destination = clean_path(as_string(body, "destination"));
         if (source.empty() || destination.empty() || within(destination, source)) fail(400, "移动路径无效");
         require_permission(db, user, source, "modify");
-        require_permission(db, user, parent_of(destination), "upload");
-        auto old = disk_path(cfg_, source), target = disk_path(cfg_, destination);
+        require_permission(db, user, parent_of(destination), user.value("_space", "legacy") == "public" ? "modify" : "upload");
+        auto old = disk_path(cfg, source), target = disk_path(cfg, destination);
+        check_busy(old); check_busy(target);
         if (!fs::exists(old) || !fs::is_directory(target.parent_path())) fail(404, "源路径或目标父文件夹不存在");
         if (fs::exists(target)) fail(409, "目标已存在");
         fs::rename(old, target);
@@ -810,7 +930,8 @@ void Service::file_actions(Db& db, const json& user, const httplib::Request& req
         auto logical = logical_arg(req);
         if (logical.empty()) fail(400, "不能删除根目录");
         require_permission(db, user, logical, "delete");
-        auto target = disk_path(cfg_, logical);
+        auto target = disk_path(cfg, logical);
+        check_busy(target);
         if (!fs::exists(target)) fail(404, "路径不存在");
         fs::remove_all(target);
         return response_json(res, 200, {{"ok", true}});
@@ -1387,6 +1508,8 @@ void Service::dispatch(const httplib::Request& req, httplib::Response& res) {
     if (req.path.rfind("/api/peer/", 0) == 0) return peer_actions(db, req, res);
     auto user = identity(db, req);
     if (authenticated_auth(db, user, req, res)) return;
+    if (req.path == "/api/spaces" || req.path.rfind("/api/spaces/", 0) == 0 || req.path == "/api/admin/storage")
+        return space_actions(db, user, req, res);
     if (req.path == "/api/me" || req.path == "/api/logout" || req.path == "/api/password")
         return account_actions(db, user, req, res);
     if (req.path.rfind("/api/remote/", 0) == 0) return proxy_actions(db, user, req, res);
@@ -1407,6 +1530,12 @@ void Service::upload(const httplib::Request& req, httplib::Response& res, const 
         return upload_file(db, user, req, res, reader);
     }
     auto user = identity(db, req);
+    if (req.path.rfind("/api/spaces/", 0) == 0) {
+        if (user.value("reset_until", 0)) fail(403, "请先完成密码重置");
+        const auto scoped = scoped_request(user, req);
+        if (scoped.second.path != "/api/upload") fail(404, "上传接口不存在");
+        return upload_file(db, scoped.first, scoped.second, res, reader);
+    }
     if (req.path == "/api/upload") return upload_file(db, user, req, res, reader);
     if (req.path.rfind("/api/remote/", 0) == 0) return proxy_upload(db, user, req, res, reader);
     fail(404, "接口不存在");
@@ -1427,6 +1556,7 @@ static void handle_errors(const std::function<void()>& work, httplib::Response& 
 // listening sockets, request body spooling, and response streaming.
 static bool upload_route(const std::string& path) {
     return path == "/api/upload" || path == "/api/peer/files/upload" ||
+           path == "/api/spaces/personal/upload" || path == "/api/spaces/public/upload" ||
            (path.rfind("/api/remote/", 0) == 0 &&
             path.size() >= 7 && path.compare(path.size() - 7, 7, "/upload") == 0);
 }

@@ -137,7 +137,7 @@ MYFOLDER_MAX_REQUEST_GIB=5
     if binary:
         files.append(("./opt/myfolder-lan/bin/myfolder-lan", Path(binary).read_bytes(), 0o755))
     else:
-        for relative in ("CMakeLists.txt", "src/main.cpp", "src/auth.h", "third_party/httplib.h", "third_party/httplib.LICENSE",
+        for relative in ("CMakeLists.txt", "src/main.cpp", "src/auth.h", "src/spaces.h", "third_party/httplib.h", "third_party/httplib.LICENSE",
                          "third_party/json.hpp", "third_party/json.LICENSE"):
             files.append((f"./opt/myfolder-lan/cpp/{relative}", (BASE / "cpp" / relative).read_bytes(), 0o644))
     web_dist = BASE / "web" / "dist"

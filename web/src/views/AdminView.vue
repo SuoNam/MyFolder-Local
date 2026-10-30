@@ -5,9 +5,11 @@ import Icon from '../components/Icon.vue'
 import SelectMenu from '../components/SelectMenu.vue'
 import AccountApprovals from '../components/AccountApprovals.vue'
 import LoginPolicySettings from '../components/LoginPolicySettings.vue'
+import StorageSettings from '../components/StorageSettings.vue'
 
 const props = defineProps<{ currentUser: User }>()
 const approvals = ref<InstanceType<typeof AccountApprovals> | null>(null)
+const storageSettings = ref<InstanceType<typeof StorageSettings> | null>(null)
 type GrantRow = Grant & { username: string }
 const users = ref<User[]>([])
 const grants = ref<GrantRow[]>([])
@@ -40,6 +42,7 @@ async function refresh() {
     grants.value = all.flat()
     passwordRequests.value = (await api.passwordRequests()).requests
     await approvals.value?.refresh()
+    await storageSettings.value?.refresh()
   } catch (e) { error.value = errorText(e) }
   finally { loading.value = false }
 }
@@ -90,8 +93,9 @@ function enabledPermissions(item: GrantRow): Permission[] {
 <template>
   <header class="topbar"><span class="eyebrow">Access control / LAN</span><div class="spacer" /><button class="btn" :disabled="loading" @click="refresh"><Icon name="refresh" />刷新</button></header>
   <div class="page lan-admin">
-    <div class="page-head"><div><h1 class="h1">用户与权限</h1><p class="sub">为普通用户分配指定路径的访问能力。</p></div></div>
+    <div class="page-head"><div><h1 class="h1">用户与权限</h1><p class="sub">管理个人配额、公共区写权限及原目录授权。</p></div></div>
     <LoginPolicySettings :role="props.currentUser.role" />
+    <StorageSettings ref="storageSettings" />
     <AccountApprovals ref="approvals" @changed="refresh" />
     <p v-if="error" class="lan-message is-error" role="alert">{{ error }} <button @click="error = ''">×</button></p>
     <p v-if="notice" class="lan-message is-ok" role="status">{{ notice }} <button @click="notice = ''">×</button></p>

@@ -15,7 +15,7 @@ async function review(id: number, decision: 'approve' | 'reject') {
   busy.value = true; error.value = ''; notice.value = ''
   try {
     await api.reviewRegistration(id, decision)
-    notice.value = decision === 'approve' ? '账号已通过审核，密码登录默认记住浏览器；新账号仍需分配文件权限' : '已驳回申请'
+    notice.value = decision === 'approve' ? '账号已通过审核，已有个人空间和公共区只读权限；公共区写权限需另行授权' : '已驳回申请'
     await refresh()
     emit('changed')
   } catch (e) { error.value = e instanceof Error ? e.message : '审核失败' }
@@ -36,7 +36,7 @@ defineExpose({ refresh })
   <div class="lan-review-card lan-account-approvals">
     <p v-if="error" class="lan-message is-error" role="alert">{{ error }}<button aria-label="关闭审核错误" @click="error = ''">×</button></p>
     <p v-if="notice" class="lan-message is-ok" role="status">{{ notice }}<button aria-label="关闭审核提示" @click="notice = ''">×</button></p>
-    <section class="card"><div class="card-head"><div><h2 class="h3">注册申请审核</h2><p class="sub">仅创建普通账号，默认无文件权限；账号通过后密码登录自动记住浏览器，无需另审设备。</p></div><div class="spacer" /><button class="btn btn-sm" :disabled="busy" @click="refresh">刷新审核列表</button></div>
+    <section class="card"><div class="card-head"><div><h2 class="h3">注册申请审核</h2><p class="sub">创建普通账号，默认拥有个人空间和公共区只读权限；公共区写权限需管理员授权，无需另审浏览器。</p></div><div class="spacer" /><button class="btn btn-sm" :disabled="busy" @click="refresh">刷新审核列表</button></div>
       <div class="lan-table-wrap"><table class="files"><thead><tr><th>申请账号</th><th>设备</th><th>申请时间</th><th>状态</th><th>操作</th></tr></thead><tbody>
         <tr v-for="item in registrations" :key="item.id"><td data-label="账号">{{ item.username }}</td><td data-label="设备">{{ item.device_name }} <span v-if="item.trust_device" class="chip chip-ok">自动记住浏览器</span></td><td data-label="提交时间">{{ authTime(item.created_at) }}</td><td data-label="状态">{{ authStatus[item.status] }}</td><td data-label="操作"><template v-if="item.status === 'pending'"><button class="btn btn-sm btn-primary" :disabled="busy" @click="review(item.id, 'approve')">通过注册</button> <button class="btn btn-sm btn-danger" :disabled="busy" @click="review(item.id, 'reject')">驳回注册</button></template></td></tr>
         <tr v-if="!registrations.length"><td colspan="5" class="lan-table-empty">暂无注册申请</td></tr>

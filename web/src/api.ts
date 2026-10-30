@@ -7,7 +7,9 @@ export type RegistrationStatus = { username: string; status: 'pending' | 'approv
 export type RegistrationRequest = RegistrationStatus & { id: number; device_name: string; trust_device: number; created_at: number; expires_at: number; reviewed_at: number | null }
 export type TrustedDevice = { id: number; user_id: number; name: string; status: 'pending' | 'approved' | 'rejected' | 'revoked' | 'expired'; created_at: number; expires_at: number; last_used_at: number; reviewed_at: number | null; username?: string; role?: User['role']; current?: boolean }
 export type FileEntry = { name: string; path: string; directory: boolean; size: number | null; modified: number; permissions: Permission[] }
-export type FileList = { path: string; permissions: Permission[]; items: FileEntry[] }
+export type FileSpace = 'personal' | 'public' | 'legacy'
+export type FileList = { path: string; permissions: Permission[]; items: FileEntry[]; storage?: { used: number; limit: number } }
+export type StorageUser = { id: number; username: string; role: User['role']; storage_used: number; storage_limit: number; public_upload: boolean; public_modify: boolean; public_delete: boolean }
 export type Grant = { id: number; user_id: number; path: string; upload: number; download: number; modify: number; delete_allowed: number }
 export type ServerInfo = { name: string; server_id: string; storage_path: string; storage_limit: number; storage_used: number; file_count: number; remotes: { id: number; remote_name: string; status: string }[] }
 export type PasswordRequest = { id: number; username: string; role: User['role']; status: string; created_at: number; reviewed_at: number | null }
@@ -52,10 +54,13 @@ const json = (method: string, body: unknown): RequestInit => ({
 const params = (values: Record<string, string | number>) => new URLSearchParams(
   Object.entries(values).map(([key, value]) => [key, String(value)]),
 ).toString()
-const fileEndpoint = (operation: string, remoteId?: number | null) => remoteId == null ? operation : `remote/${remoteId}/${operation}`
+const fileEndpoint = (operation: string, remoteId?: number | null, space: FileSpace = 'legacy') => remoteId != null ? `remote/${remoteId}/${operation}` : space === 'legacy' ? operation : `spaces/${space}/${operation}`
 
 export const api = {
   authOptions: () => request<AuthOptions>('auth/options'),
+  spaces: () => request<{ legacy_visible: boolean; personal: { used: number; limit: number }; public: { used: number; permissions: Permission[] }; server: { used: number; limit: number } }>('spaces'),
+  storageUsers: () => request<{ users: StorageUser[] }>('admin/storage'),
+  saveStorageUser: (user: { user_id: number; storage_limit: number; public_upload: boolean; public_modify: boolean; public_delete: boolean }) => request<{ ok: boolean }>('admin/storage', json('POST', user)),
   loginPolicy: () => request<LoginPolicy>('admin/login-policy'),
   saveLoginPolicy: (device_days: number) => request<LoginPolicy>('admin/login-policy', json('POST', { device_days })),
   register: (username: string, password: string, device_name: string, trust_device: boolean) => request<RegistrationStatus>('register', json('POST', { username, password, device_name, trust_device })),
@@ -78,10 +83,10 @@ export const api = {
   changePassword: (password: string) => request<{ ok: boolean }>('password', json('POST', { password })),
   serverInfo: () => request<ServerInfo>('server-info'),
   saveServerInfo: (name: string, storage_limit: number) => request<ServerInfo>('server-info', json('POST', { name, storage_limit })),
-  list: (path: string, remoteId?: number | null) => request<FileList>(`${fileEndpoint('list', remoteId)}?${params({ path })}`),
-  mkdir: (path: string, remoteId?: number | null) => request<{ ok: boolean }>(fileEndpoint('mkdir', remoteId), json('POST', { path })),
-  move: (source: string, destination: string, remoteId?: number | null) => request<{ ok: boolean }>(fileEndpoint('move', remoteId), json('POST', { source, destination })),
-  remove: (path: string, remoteId?: number | null) => request<{ ok: boolean }>(`${fileEndpoint('delete', remoteId)}?${params({ path })}`, { method: 'DELETE' }),
+  list: (path: string, remoteId?: number | null, space?: FileSpace) => request<FileList>(`${fileEndpoint('list', remoteId, space)}?${params({ path })}`),
+  mkdir: (path: string, remoteId?: number | null, space?: FileSpace) => request<{ ok: boolean }>(fileEndpoint('mkdir', remoteId, space), json('POST', { path })),
+  move: (source: string, destination: string, remoteId?: number | null, space?: FileSpace) => request<{ ok: boolean }>(fileEndpoint('move', remoteId, space), json('POST', { source, destination })),
+  remove: (path: string, remoteId?: number | null, space?: FileSpace) => request<{ ok: boolean }>(`${fileEndpoint('delete', remoteId, space)}?${params({ path })}`, { method: 'DELETE' }),
   users: () => request<{ users: User[] }>('users'),
   addUser: (username: string, password: string, role: User['role']) => request<{ ok: boolean }>('users', json('POST', { username, password, role })),
   removeUser: (id: number) => request<{ ok: boolean }>(`users?${params({ id })}`, { method: 'DELETE' }),
@@ -97,14 +102,14 @@ export const api = {
   removeRemoteGrant: (id: number) => request<{ ok: boolean }>(`remotes/incoming/grants?${params({ id })}`, { method: 'DELETE' }),
 }
 
-export function downloadUrl(path: string, directory: boolean, remoteId?: number | null): string {
-  return `/api/${fileEndpoint(directory ? 'folder.zip' : 'download', remoteId)}?${params({ path })}`
+export function downloadUrl(path: string, directory: boolean, remoteId?: number | null, space?: FileSpace): string {
+  return `/api/${fileEndpoint(directory ? 'folder.zip' : 'download', remoteId, space)}?${params({ path })}`
 }
 
-export function uploadFile(file: File, path: string, onProgress: (sent: number, total: number) => void, remoteId?: number | null): Promise<void> {
+export function uploadFile(file: File, path: string, onProgress: (sent: number, total: number) => void, remoteId?: number | null, space?: FileSpace): Promise<void> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
-    xhr.open('PUT', `/api/${fileEndpoint('upload', remoteId)}?${params({ path })}`)
+    xhr.open('PUT', `/api/${fileEndpoint('upload', remoteId, space)}?${params({ path })}`)
     xhr.upload.onprogress = event => onProgress(event.loaded, event.total || file.size)
     xhr.onload = () => {
       if (xhr.status >= 200 && xhr.status < 300) { resolve(); return }

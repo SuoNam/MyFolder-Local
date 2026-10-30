@@ -1,5 +1,6 @@
 """Real-socket auth tests on disposable databases, never on deployment accounts."""
 import hashlib
+from contextlib import closing
 import http.client
 from http.cookies import SimpleCookie
 import json
@@ -57,7 +58,7 @@ class ApprovalAuthentication(unittest.TestCase):
         self.assertEqual(self.admin.login(remember=False)[0], 200)
 
     def sql(self, query, params=()):
-        with sqlite3.connect(self.node.data / 'myfolder.sqlite3') as db:
+        with closing(sqlite3.connect(self.node.data / 'myfolder.sqlite3')) as db, db:
             return db.execute(query, params).fetchall()
 
     def review_registration(self, name, decision='approve'):
@@ -484,7 +485,7 @@ class ApprovalAuthentication(unittest.TestCase):
     def test_existing_database_migration_keeps_users_and_sessions(self):
         self.node.process.terminate(); self.node.process.wait(timeout=5); self.node.process.stderr.close()
         rows = self.sql('SELECT token_hash,user_id,expires_at FROM sessions')
-        with sqlite3.connect(self.node.data / 'myfolder.sqlite3') as db:
+        with closing(sqlite3.connect(self.node.data / 'myfolder.sqlite3')) as db, db:
             db.execute('DROP TABLE sessions')
             db.execute('DROP TABLE registration_requests')
             db.execute('DROP TABLE trusted_devices')

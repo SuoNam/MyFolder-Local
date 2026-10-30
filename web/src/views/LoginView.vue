@@ -71,7 +71,7 @@ onUnmounted(() => { mounted = false; clearInterval(timer) })
         <div class="brand auth-brand"><img class="brand-mark" src="/myfolder-icon-v2.png" alt="" /><div class="brand-name">MyFolder</div><div class="brand-ver">LAN 1.5</div></div>
         <p class="eyebrow">Private workspace</p>
         <h1 class="h1 auth-title">{{ title }}</h1>
-        <p class="sub auth-sub">{{ mode === 'forgot' ? '提交申请，由上级管理员审核。通过后使用临时密码 123456 登录，并在 30 分钟内修改。' : mode === 'register' ? '注册普通账号，由管理员审核；文件权限由管理员另行分配。' : '继续管理内网文件与访问权限。' }}</p>
+        <p class="sub auth-sub">{{ mode === 'forgot' ? '提交申请，由上级管理员审核。通过后使用临时密码 123456 登录，并在 30 分钟内修改。' : mode === 'register' ? '注册普通账号，由管理员审核；获批后拥有个人空间，公共区默认只读。' : '继续管理内网文件与访问权限。' }}</p>
         <section v-if="registration" class="card lan-registration-status" aria-label="注册审核状态">
           <strong>{{ registration.username }} · {{ ({ pending: '等待管理员审核', approved: '注册已通过', rejected: '申请已驳回', expired: '申请已过期' })[registration.status] }}</strong>
           <p class="sub">{{ registration.status === 'pending' ? '此浏览器会自动检查审核结果，也可以手动刷新。' : registration.status === 'approved' ? '可使用注册时设置的密码登录；如未领取，可直接进入。' : '请联系管理员了解原因，或重新提交申请。' }}</p>

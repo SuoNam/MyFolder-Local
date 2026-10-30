@@ -4,6 +4,7 @@ This exercises the default HTTP mode without an insecure-login override.
 The administrator password below is public test data, not a deployment credential.
 """
 import argparse
+from contextlib import closing
 import base64
 import hashlib
 import json
@@ -24,7 +25,7 @@ def main():
         salt = os.urandom(16)
         digest = hashlib.pbkdf2_hmac('sha256', b'Temporary-test-password-1', salt, 310000)
         encoded = 'pbkdf2:310000:' + base64.b64encode(salt).decode() + ':' + base64.b64encode(digest).decode()
-        with sqlite3.connect(node.data / 'myfolder.sqlite3') as db:
+        with closing(sqlite3.connect(node.data / 'myfolder.sqlite3')) as db, db:
             db.execute('UPDATE users SET password=? WHERE username=?', (encoded, 'admin'))
         def finish(*_):
             raise KeyboardInterrupt
